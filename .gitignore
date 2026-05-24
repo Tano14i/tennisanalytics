@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environments
+.env
+.venv
+venv/
+env/
+
+# Legacy / misnamed files
+procfile.txt
+
+# OS
+.DS_Store
+Thumbs.db
