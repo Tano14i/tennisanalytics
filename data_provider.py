@@ -28,7 +28,9 @@ except ImportError:
     _REQUESTS_OK = False
 
 # ── API configuration ─────────────────────────────────────────────────────────
-_RAPIDAPI_KEY  = os.getenv("RAPIDAPI_KEY", "")
+# Key is intentionally NOT cached at module level — it is read fresh on every
+# call via os.getenv() so that app.py can inject it from st.secrets at runtime
+# before the first API call is made.
 _RAPIDAPI_HOST = "api-tennis.p.rapidapi.com"
 _API_BASE      = f"https://{_RAPIDAPI_HOST}"
 _TIMEOUT       = 6   # seconds
@@ -253,8 +255,9 @@ _MOCK_SCHEDULE: list[dict] = [
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _api_headers() -> dict:
+    """Build request headers, reading the key fresh each time from the env."""
     return {
-        "x-rapidapi-key":  _RAPIDAPI_KEY,
+        "x-rapidapi-key":  os.getenv("RAPIDAPI_KEY", ""),
         "x-rapidapi-host": _RAPIDAPI_HOST,
     }
 
@@ -309,7 +312,7 @@ def _fetch_schedule_from_api(
     a given date.  Returns a list of normalised fixture dicts, or None
     on any failure so get_daily_schedule() can fall back to mock data.
     """
-    if not _RAPIDAPI_KEY or not _REQUESTS_OK:
+    if not os.getenv("RAPIDAPI_KEY") or not _REQUESTS_OK:
         return None
 
     params: dict = {"from": date_str, "to": date_str, "status": "NS"}
@@ -493,7 +496,7 @@ def _fetch_live_player(name: str) -> Optional[dict]:
     Full live-fetch pipeline: search → fetch matches → merge onto mock base.
     Returns player dict with '_data_source': 'live', or None on any failure.
     """
-    if not _RAPIDAPI_KEY or not _REQUESTS_OK:
+    if not os.getenv("RAPIDAPI_KEY") or not _REQUESTS_OK:
         return None
 
     cache_key = name.lower()

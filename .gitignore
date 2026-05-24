@@ -9,6 +9,9 @@ __pycache__/
 venv/
 env/
 
+# Streamlit local secrets — NEVER commit
+.streamlit/secrets.toml
+
 # Legacy / misnamed files
 procfile.txt
 

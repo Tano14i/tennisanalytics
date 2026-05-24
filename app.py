@@ -7,8 +7,20 @@ Schedule-driven workflow:
   Step 3  Main     — click GENERA REPORT to run analytics and get the post
 """
 
+import os
 import streamlit as st
 from datetime import date as _date
+
+# ── Secrets bootstrap ─────────────────────────────────────────────────────────
+# Streamlit loads .streamlit/secrets.toml (local) or the Secrets panel
+# (Streamlit Cloud) into st.secrets, but does NOT inject them into os.environ.
+# data_provider.py reads the key via os.getenv() on every call, so we sync
+# st.secrets → os.environ here, once, before any data_provider import runs.
+try:
+    if "RAPIDAPI_KEY" in st.secrets and not os.environ.get("RAPIDAPI_KEY"):
+        os.environ["RAPIDAPI_KEY"] = st.secrets["RAPIDAPI_KEY"]
+except Exception:
+    pass  # secrets not available (e.g. CLI run) — graceful no-op
 
 import data_provider as dp
 import analytics as an
