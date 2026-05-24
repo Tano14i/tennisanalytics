@@ -1,26 +1,26 @@
 """
 Data provider for TennisIQ Analytics.
 
-Data-source ladder (evaluated in order every call):
-  1. RapidAPI live  — recent matches + ranking (requires RAPIDAPI_KEY env var)
-  2. Mock fallback  — complete static dataset, always available
+Data-source ladder — evaluated in order on every call:
+  1. RapidAPI live  — schedule + player data   (requires RAPIDAPI_KEY env var)
+  2. Mock fallback  — static dataset + sample fixtures, always available
 
-When a RAPIDAPI_KEY is present, get_player() fetches the player's last three
-matches and current ranking from api-tennis.p.rapidapi.com, then merges them
-onto the mock base-record to fill fields the free-tier API doesn't expose
-(surface_records, break_points, tiebreaks).  If the key is missing or any
-network/HTTP/parse error occurs, the function falls back silently to the mock
-data so the app never crashes.
+Two independent caches live at module level:
+  _LIVE_CACHE      — player dicts,  keyed by name.lower()
+  _SCHEDULE_CACHE  — fixture lists, keyed by "date|tournament_id"
 
-Each returned dict carries a '_data_source' key ("live" or "mock") that
-app.py can surface as a status badge without touching analytics.py.
+Both caches survive Streamlit rerenders within a single session and are
+cleared automatically when the process restarts (deploy / dyno restart).
+
+Every public return value carries a '_data_source' key ("live" or "mock")
+so app.py can render a status badge without touching analytics.py.
 """
 
 import os
 import warnings
+from datetime import date as _date
 from typing import Optional
 
-# requests is an optional dependency — the app works without it (mock only).
 try:
     import requests as _req
     _REQUESTS_OK = True
@@ -31,14 +31,14 @@ except ImportError:
 _RAPIDAPI_KEY  = os.getenv("RAPIDAPI_KEY", "")
 _RAPIDAPI_HOST = "api-tennis.p.rapidapi.com"
 _API_BASE      = f"https://{_RAPIDAPI_HOST}"
-_TIMEOUT       = 5          # seconds per request
-_RECENT_LIMIT  = 3          # how many recent matches to pull
+_TIMEOUT       = 6   # seconds
+_RECENT_LIMIT  = 3   # recent matches to pull per player
 
-# Session-level cache  { name_lower: player_dict }
-# Prevents duplicate API calls on Streamlit rerenders.
-_LIVE_CACHE: dict[str, dict] = {}
+# ── Module-level caches ───────────────────────────────────────────────────────
+_LIVE_CACHE:     dict[str, dict]       = {}   # name.lower() → player dict
+_SCHEDULE_CACHE: dict[str, list[dict]] = {}   # "date|tid"   → fixture list
 
-# ── Mock dataset ──────────────────────────────────────────────────────────────
+# ── Mock player dataset ───────────────────────────────────────────────────────
 PLAYERS: dict[str, dict] = {
     "Sinner": {
         "full_name": "Jannik Sinner",
@@ -53,8 +53,8 @@ PLAYERS: dict[str, dict] = {
             "Hard":  {"wins": 61, "losses": 14},
             "Grass": {"wins": 18, "losses":  9},
         },
-        "break_points":       {"opportunities": 84, "converted": 38},
-        "break_points_saved": {"faced": 72, "saved": 46},
+        "break_points":       {"opportunities": 84,  "converted": 38},
+        "break_points_saved": {"faced": 72,  "saved": 46},
         "tiebreaks":          {"played": 34, "won": 22},
     },
     "Alcaraz": {
@@ -71,7 +71,7 @@ PLAYERS: dict[str, dict] = {
             "Grass": {"wins": 22, "losses":  6},
         },
         "break_points":       {"opportunities": 96,  "converted": 48},
-        "break_points_saved": {"faced": 68, "saved": 44},
+        "break_points_saved": {"faced": 68,  "saved": 44},
         "tiebreaks":          {"played": 38, "won": 23},
     },
     "Djokovic": {
@@ -178,13 +178,8 @@ PLAYERS: dict[str, dict] = {
     },
 }
 
-# Surface-to-tournament mapping.
-# Hard courts split into "Hard (Outdoor)" and "Hard (Indoor)".
-# Existing "Hard" entries kept for backwards compat; analytics.py
-# falls back from the sub-type to "Hard" when player records don't
-# carry the variant yet.
+# ── Tournament → Surface mapping ──────────────────────────────────────────────
 TOURNAMENT_SURFACES: dict[str, str] = {
-    # Clay
     "Roland Garros":      "Clay",
     "French Open":        "Clay",
     "Monte-Carlo":        "Clay",
@@ -192,20 +187,16 @@ TOURNAMENT_SURFACES: dict[str, str] = {
     "Italian Open":       "Clay",
     "Rome":               "Clay",
     "Barcelona Open":     "Clay",
-    # Grass
     "Wimbledon":          "Grass",
     "Queen's Club":       "Grass",
     "Halle":              "Grass",
-    # Hard (legacy parent key — player records use "Hard")
     "US Open":            "Hard",
     "Australian Open":    "Hard",
     "Miami Open":         "Hard",
     "Indian Wells":       "Hard",
-    # Hard (Outdoor)
     "Cincinnati Masters": "Hard (Outdoor)",
     "Canada Masters":     "Hard (Outdoor)",
     "Stuttgart":          "Hard (Outdoor)",
-    # Hard (Indoor)
     "ATP Finals":         "Hard (Indoor)",
     "Paris Masters":      "Hard (Indoor)",
     "Vienna Open":        "Hard (Indoor)",
@@ -213,22 +204,53 @@ TOURNAMENT_SURFACES: dict[str, str] = {
     "Marseille":          "Hard (Indoor)",
 }
 
-# Reverse map: lowercase tournament keywords → surface.
-# Used by _infer_surface() when mapping raw API league names.
+# Keyword hints used by _infer_surface() to map raw API league names
 _LEAGUE_SURFACE_HINTS: dict[str, str] = {
     "roland garros": "Clay", "french open": "Clay",
-    "monte": "Clay", "madrid": "Clay", "rome": "Clay",
-    "italian": "Clay", "barcelona": "Clay", "clay": "Clay",
-    "wimbledon": "Grass", "queen": "Grass", "halle": "Grass", "grass": "Grass",
-    "australian": "Hard", "us open": "Hard",
-    "miami": "Hard", "indian wells": "Hard",
-    "cincinnati": "Hard (Outdoor)", "canada": "Hard (Outdoor)",
-    "atp finals": "Hard (Indoor)", "paris": "Hard (Indoor)",
-    "vienna": "Hard (Indoor)", "rotterdam": "Hard (Indoor)",
+    "monte":  "Clay",  "madrid":   "Clay", "rome":  "Clay",
+    "italian":"Clay",  "barcelona":"Clay", "clay":  "Clay",
+    "wimbledon":"Grass","queen":"Grass",   "halle": "Grass", "grass":"Grass",
+    "australian":"Hard","us open":  "Hard","miami": "Hard",  "indian wells":"Hard",
+    "cincinnati":"Hard (Outdoor)","canada":"Hard (Outdoor)",
+    "atp finals":"Hard (Indoor)","paris":"Hard (Indoor)",
+    "vienna":"Hard (Indoor)",    "rotterdam":"Hard (Indoor)",
 }
 
+# ── Sample fixtures — shown when the schedule API is unavailable ──────────────
+# Structured as realistic clay-season matches (late May).
+_MOCK_SCHEDULE: list[dict] = [
+    {
+        "label":      "J. Sinner vs C. Ruud",
+        "p1_name":    "Jannik Sinner",   "p1_key": None,
+        "p2_name":    "Casper Ruud",     "p2_key": None,
+        "tournament": "Roland Garros",   "surface": "Clay",
+        "time":       "11:00",           "_source": "mock",
+    },
+    {
+        "label":      "C. Alcaraz vs N. Djokovic",
+        "p1_name":    "Carlos Alcaraz",  "p1_key": None,
+        "p2_name":    "Novak Djokovic",  "p2_key": None,
+        "tournament": "Roland Garros",   "surface": "Clay",
+        "time":       "13:30",           "_source": "mock",
+    },
+    {
+        "label":      "A. Zverev vs S. Tsitsipas",
+        "p1_name":    "Alexander Zverev","p1_key": None,
+        "p2_name":    "Stefanos Tsitsipas","p2_key": None,
+        "tournament": "Roland Garros",   "surface": "Clay",
+        "time":       "15:00",           "_source": "mock",
+    },
+    {
+        "label":      "D. Medvedev vs H. Rune",
+        "p1_name":    "Daniil Medvedev", "p1_key": None,
+        "p2_name":    "Holger Rune",     "p2_key": None,
+        "tournament": "Roland Garros",   "surface": "Clay",
+        "time":       "17:00",           "_source": "mock",
+    },
+]
 
-# ── RapidAPI layer ────────────────────────────────────────────────────────────
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _api_headers() -> dict:
     return {
@@ -239,18 +261,168 @@ def _api_headers() -> dict:
 
 def _infer_surface(league_name: str) -> str:
     """Map a raw API league/tournament name to one of our surface strings."""
-    league_lower = league_name.lower()
-    for keyword, surface in _LEAGUE_SURFACE_HINTS.items():
-        if keyword in league_lower:
-            return surface
-    return "Hard"  # safe default
+    low = league_name.lower()
+    for kw, surf in _LEAGUE_SURFACE_HINTS.items():
+        if kw in low:
+            return surf
+    return "Hard"
 
+
+def _abbreviate(full_name: str) -> str:
+    """'Jannik Sinner' → 'J. Sinner'  (safe with single-word names)."""
+    parts = full_name.strip().split()
+    if len(parts) < 2:
+        return full_name
+    return f"{parts[0][0]}. {' '.join(parts[1:])}"
+
+
+def _build_fixture(
+    p1_name: str, p1_key: Optional[str],
+    p2_name: str, p2_key: Optional[str],
+    league: str,  time_str: str,
+    source: str = "live",
+) -> dict:
+    """Assemble a normalised fixture dict from raw API field values."""
+    surface = _infer_surface(league)
+    label   = f"{_abbreviate(p1_name)} vs {_abbreviate(p2_name)}"
+    return {
+        "label":      label,
+        "p1_name":    p1_name,
+        "p1_key":     p1_key,
+        "p2_name":    p2_name,
+        "p2_key":     p2_key,
+        "tournament": league or "Unknown Tournament",
+        "surface":    surface,
+        "time":       time_str or "TBD",
+        "_source":    source,
+    }
+
+
+# ── Schedule API layer ────────────────────────────────────────────────────────
+
+def _fetch_schedule_from_api(
+    date_str: str,
+    tournament_id: Optional[str],
+) -> Optional[list[dict]]:
+    """
+    Hit the /matches endpoint for scheduled (not-started) fixtures on
+    a given date.  Returns a list of normalised fixture dicts, or None
+    on any failure so get_daily_schedule() can fall back to mock data.
+    """
+    if not _RAPIDAPI_KEY or not _REQUESTS_OK:
+        return None
+
+    params: dict = {"from": date_str, "to": date_str, "status": "NS"}
+    if tournament_id:
+        params["league_id"] = tournament_id
+
+    try:
+        resp = _req.get(
+            f"{_API_BASE}/matches",
+            headers=_api_headers(),
+            params=params,
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        raw = resp.json().get("result") or []
+
+        fixtures: list[dict] = []
+        for m in raw:
+            home     = str(m.get("event_home_team") or "").strip()
+            away     = str(m.get("event_away_team") or "").strip()
+            home_key = str(m.get("event_home_team_key") or "")
+            away_key = str(m.get("event_away_team_key") or "")
+            league   = str(m.get("league_name") or "")
+            evt_time = str(m.get("event_time") or "")
+
+            if not home or not away:
+                continue
+
+            fixtures.append(
+                _build_fixture(home, home_key, away, away_key, league, evt_time)
+            )
+
+        return fixtures if fixtures else None
+
+    except Exception as exc:
+        warnings.warn(
+            f"[TennisIQ] Schedule fetch failed for {date_str}: {exc!r}. "
+            "Using sample fixtures.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
+
+
+# ── Schedule public API ───────────────────────────────────────────────────────
+
+def get_daily_schedule(
+    date: str,
+    tournament_id: Optional[str] = None,
+) -> list[dict]:
+    """
+    Return a list of fixture dicts for the given date.
+
+    Each dict contains:
+        label      — display string  e.g. "J. Sinner vs C. Ruud"
+        p1_name    — full first-player name
+        p1_key     — RapidAPI player key (None for mock fixtures)
+        p2_name    — full second-player name
+        p2_key     — RapidAPI player key (None for mock fixtures)
+        tournament — tournament name string
+        surface    — inferred surface string
+        time       — scheduled time string or "TBD"
+        _source    — "live" or "mock"
+
+    Falls back to _MOCK_SCHEDULE when the API is unavailable or returns
+    no fixtures.  Result is cached in _SCHEDULE_CACHE for the session.
+    """
+    cache_key = f"{date}|{tournament_id or 'all'}"
+    if cache_key in _SCHEDULE_CACHE:
+        return _SCHEDULE_CACHE[cache_key]
+
+    live = _fetch_schedule_from_api(date, tournament_id)
+    if live is not None and len(live) > 0:
+        _SCHEDULE_CACHE[cache_key] = live
+        return live
+
+    # Fallback: return mock schedule (not cached — always fresh sample)
+    return list(_MOCK_SCHEDULE)
+
+
+# ── Player public API ─────────────────────────────────────────────────────────
+
+def get_player(name: str) -> dict:
+    """
+    Return a player data dict suitable for analytics.compute_all().
+
+    Tries the RapidAPI live feed first; falls back to the mock dataset.
+    Raises ValueError only when no match is found in either source.
+    """
+    live = _fetch_live_player(name)
+    if live is not None:
+        return live
+
+    key = _fuzzy_match(name)
+    if key is None:
+        raise ValueError(
+            f"Player '{name}' not found. "
+            f"Available: {', '.join(PLAYERS.keys())}"
+        )
+    record = dict(PLAYERS[key])
+    record.setdefault("_data_source", "mock")
+    return record
+
+
+def list_players() -> list[str]:
+    """Player short-keys from the mock dataset (used for fallback UI only)."""
+    return list(PLAYERS.keys())
+
+
+# ── Player API layer ──────────────────────────────────────────────────────────
 
 def _fetch_player_meta(name: str) -> Optional[tuple[str, str, int]]:
-    """
-    Search the API for a player by name.
-    Returns (player_key, full_name, ranking) or None on any failure.
-    """
+    """Search API → (player_key, full_name, ranking) or None."""
     resp = _req.get(
         f"{_API_BASE}/players",
         headers=_api_headers(),
@@ -261,7 +433,7 @@ def _fetch_player_meta(name: str) -> Optional[tuple[str, str, int]]:
     results = resp.json().get("result") or []
     if not results:
         return None
-    hit = results[0]
+    hit      = results[0]
     key      = str(hit.get("player_key") or "")
     fullname = str(hit.get("player_name") or name)
     ranking  = int(hit.get("player_rank") or 0)
@@ -269,10 +441,7 @@ def _fetch_player_meta(name: str) -> Optional[tuple[str, str, int]]:
 
 
 def _fetch_recent_matches(player_key: str, full_name: str) -> list[dict]:
-    """
-    Fetch the last _RECENT_LIMIT finished matches for a player from the API.
-    Returns a list in our internal match-dict format.
-    """
+    """Fetch last _RECENT_LIMIT finished matches for a player."""
     resp = _req.get(
         f"{_API_BASE}/matches",
         headers=_api_headers(),
@@ -280,47 +449,40 @@ def _fetch_recent_matches(player_key: str, full_name: str) -> list[dict]:
         timeout=_TIMEOUT,
     )
     resp.raise_for_status()
-    raw_matches = resp.json().get("result") or []
+    raw = resp.json().get("result") or []
 
     matches: list[dict] = []
     player_lower = full_name.lower()
 
-    for m in raw_matches:
+    for m in raw:
         if len(matches) >= _RECENT_LIMIT:
             break
-
-        home = str(m.get("event_home_team") or "")
-        away = str(m.get("event_away_team") or "")
-        winner_side = str(m.get("event_winner") or "")
-
-        is_home = player_lower in home.lower()
-        opponent = away if is_home else home
+        home         = str(m.get("event_home_team") or "")
+        away         = str(m.get("event_away_team") or "")
+        winner_side  = str(m.get("event_winner") or "")
+        is_home      = player_lower in home.lower()
+        opponent     = away if is_home else home
 
         if winner_side == "Home":
             result = "W" if is_home else "L"
         elif winner_side == "Away":
             result = "L" if is_home else "W"
         else:
-            continue  # skip matches without a clear result
+            continue
 
-        # Duration: try several field names the API may use
         raw_dur = (
-            m.get("event_time")
-            or m.get("match_duration")
-            or m.get("event_length")
+            m.get("event_time") or m.get("match_duration") or m.get("event_length")
         )
         try:
             duration = max(30, int(raw_dur))
         except (TypeError, ValueError):
-            duration = 95  # sensible default when API omits it
-
-        surface = _infer_surface(str(m.get("league_name") or ""))
+            duration = 95
 
         matches.append({
-            "opponent":    opponent or "Unknown",
+            "opponent":     opponent or "Unknown",
             "duration_min": duration,
-            "result":      result,
-            "surface":     surface,
+            "result":       result,
+            "surface":      _infer_surface(str(m.get("league_name") or "")),
         })
 
     return matches
@@ -328,14 +490,8 @@ def _fetch_recent_matches(player_key: str, full_name: str) -> list[dict]:
 
 def _fetch_live_player(name: str) -> Optional[dict]:
     """
-    Full live-fetch pipeline:
-      1. Search player → get key + full_name + ranking
-      2. Fetch last 3 matches
-      3. Merge onto the mock base-record (preserves surface_records,
-         break_points, tiebreaks which the free API tier doesn't expose)
-
-    Returns a merged player dict with '_data_source': 'live', or None on
-    any error so the caller can fall back to mock data.
+    Full live-fetch pipeline: search → fetch matches → merge onto mock base.
+    Returns player dict with '_data_source': 'live', or None on any failure.
     """
     if not _RAPIDAPI_KEY or not _REQUESTS_OK:
         return None
@@ -346,83 +502,45 @@ def _fetch_live_player(name: str) -> Optional[dict]:
 
     try:
         meta = _fetch_player_meta(name)
-        if meta is None:
+        if not meta:
             return None
         player_key, full_name, ranking = meta
 
         recent = _fetch_recent_matches(player_key, full_name)
         if not recent:
-            return None  # no matches → live data not useful
+            return None
 
-        # Base: use the mock record for fields the API doesn't cover,
-        # then overlay the fresh live values.
         mock_key = _fuzzy_match(name)
-        base = dict(PLAYERS[mock_key]) if mock_key else {}
-
-        live_record = {
+        base     = dict(PLAYERS[mock_key]) if mock_key else {}
+        record   = {
             **base,
             "full_name":      full_name,
             "ranking":        ranking or base.get("ranking", 0),
             "recent_matches": recent,
             "_data_source":   "live",
         }
-
-        _LIVE_CACHE[cache_key] = live_record
-        return live_record
+        _LIVE_CACHE[cache_key] = record
+        return record
 
     except Exception as exc:
         warnings.warn(
-            f"[TennisIQ] RapidAPI fetch failed for '{name}': {exc!r}. "
-            "Falling back to mock data.",
+            f"[TennisIQ] Player fetch failed for '{name}': {exc!r}. "
+            "Using mock data.",
             RuntimeWarning,
             stacklevel=2,
         )
         return None
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
-
-def get_player(name: str) -> dict:
-    """
-    Return a player data dict for analytics.
-
-    Tries the RapidAPI live feed first; falls back to the built-in mock
-    dataset on any failure.  Raises ValueError only when the name can't be
-    matched at all (live + mock both miss).
-    """
-    # 1. Try live
-    live = _fetch_live_player(name)
-    if live is not None:
-        return live
-
-    # 2. Fall back to mock
-    key = _fuzzy_match(name)
-    if key is None:
-        raise ValueError(
-            f"Player '{name}' not found. "
-            f"Available players: {', '.join(PLAYERS.keys())}"
-        )
-    record = dict(PLAYERS[key])
-    record.setdefault("_data_source", "mock")
-    return record
-
-
-def list_players() -> list[str]:
-    """Return the list of player short-keys from the mock dataset."""
-    return list(PLAYERS.keys())
-
-
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ── Shared internal helper ────────────────────────────────────────────────────
 
 def _fuzzy_match(name: str) -> Optional[str]:
-    """Case-insensitive partial match against PLAYERS keys and full_names."""
-    name_lower = name.lower()
-    # Exact key match first
+    """Case-insensitive partial match on PLAYERS keys and full_names."""
+    nl = name.lower()
     for key in PLAYERS:
-        if key.lower() == name_lower:
+        if key.lower() == nl:
             return key
-    # Partial match on key or full_name
     for key, data in PLAYERS.items():
-        if name_lower in key.lower() or name_lower in data["full_name"].lower():
+        if nl in key.lower() or nl in data["full_name"].lower():
             return key
     return None
