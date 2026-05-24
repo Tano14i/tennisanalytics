@@ -31,7 +31,12 @@ except ImportError:
 # Key is intentionally NOT cached at module level — it is read fresh on every
 # call via os.getenv() so that app.py can inject it from st.secrets at runtime
 # before the first API call is made.
-_RAPIDAPI_HOST = "api-tennis.p.rapidapi.com"
+#
+# Host: tennisapi1.p.rapidapi.com  ("Tennis API" by solutionjet)
+#   Subscribe free at: https://rapidapi.com/solutionjet/api/tennis-api4
+#   Endpoint used for schedule:  GET /matches?status=NS&date=YYYY-MM-DD
+#   Endpoint used for players:   GET /players?search=NAME
+_RAPIDAPI_HOST = "tennisapi1.p.rapidapi.com"
 _API_BASE      = f"https://{_RAPIDAPI_HOST}"
 _TIMEOUT       = 6   # seconds
 _RECENT_LIMIT  = 3   # recent matches to pull per player
@@ -315,9 +320,15 @@ def _fetch_schedule_from_api(
     if not os.getenv("RAPIDAPI_KEY") or not _REQUESTS_OK:
         return None
 
-    params: dict = {"from": date_str, "to": date_str, "status": "NS"}
+    # tennisapi1 schedule format:
+    #   GET /matches?status=NS&date=YYYY-MM-DD[&leagueId=ID]
+    # Response: { "matches": [ { "homeTeam": {"name":...,"id":...},
+    #             "awayTeam": {"name":...,"id":...},
+    #             "league": {"name":..., "id":...},
+    #             "startTime": "11:00", "status": "NS" }, ... ] }
+    params: dict = {"status": "NS", "date": date_str}
     if tournament_id:
-        params["league_id"] = tournament_id
+        params["leagueId"] = tournament_id
 
     try:
         resp = _req.get(
@@ -327,16 +338,25 @@ def _fetch_schedule_from_api(
             timeout=_TIMEOUT,
         )
         resp.raise_for_status()
-        raw = resp.json().get("result") or []
+
+        # tennisapi1 wraps results in "matches"; fall back to "result" for
+        # forward-compatibility in case the schema changes.
+        body = resp.json()
+        raw  = body.get("matches") or body.get("result") or []
 
         fixtures: list[dict] = []
         for m in raw:
-            home     = str(m.get("event_home_team") or "").strip()
-            away     = str(m.get("event_away_team") or "").strip()
-            home_key = str(m.get("event_home_team_key") or "")
-            away_key = str(m.get("event_away_team_key") or "")
-            league   = str(m.get("league_name") or "")
-            evt_time = str(m.get("event_time") or "")
+            # tennisapi1 nests teams as objects; also handle flat legacy shape
+            home_obj = m.get("homeTeam") or {}
+            away_obj = m.get("awayTeam") or {}
+            league_obj = m.get("league") or {}
+
+            home     = str(home_obj.get("name") or m.get("event_home_team") or "").strip()
+            away     = str(away_obj.get("name") or m.get("event_away_team") or "").strip()
+            home_key = str(home_obj.get("id")   or m.get("event_home_team_key") or "")
+            away_key = str(away_obj.get("id")   or m.get("event_away_team_key") or "")
+            league   = str(league_obj.get("name") or m.get("league_name") or "")
+            evt_time = str(m.get("startTime")   or m.get("event_time") or "")
 
             if not home or not away:
                 continue
@@ -425,56 +445,83 @@ def list_players() -> list[str]:
 # ── Player API layer ──────────────────────────────────────────────────────────
 
 def _fetch_player_meta(name: str) -> Optional[tuple[str, str, int]]:
-    """Search API → (player_key, full_name, ranking) or None."""
+    """Search API → (player_key, full_name, ranking) or None.
+
+    tennisapi1 player search:
+      GET /players?search=NAME
+      Response: { "players": [ { "id": "...", "name": "...", "ranking": N } ] }
+    Also handles legacy flat shape for forward-compat.
+    """
     resp = _req.get(
         f"{_API_BASE}/players",
         headers=_api_headers(),
-        params={"search": name, "type": "single"},
+        params={"search": name},
         timeout=_TIMEOUT,
     )
     resp.raise_for_status()
-    results = resp.json().get("result") or []
+    body    = resp.json()
+    results = body.get("players") or body.get("result") or []
     if not results:
         return None
     hit      = results[0]
-    key      = str(hit.get("player_key") or "")
-    fullname = str(hit.get("player_name") or name)
-    ranking  = int(hit.get("player_rank") or 0)
+    key      = str(hit.get("id")          or hit.get("player_key")  or "")
+    fullname = str(hit.get("name")        or hit.get("player_name") or name)
+    ranking  = int(hit.get("ranking")     or hit.get("player_rank") or 0)
     return (key, fullname, ranking) if key else None
 
 
 def _fetch_recent_matches(player_key: str, full_name: str) -> list[dict]:
-    """Fetch last _RECENT_LIMIT finished matches for a player."""
+    """Fetch last _RECENT_LIMIT finished matches for a player.
+
+    tennisapi1:  GET /matches?playerId=ID&status=FT
+    Response: { "matches": [ { "homeTeam": {name, id},
+                                "awayTeam": {name, id},
+                                "winner":   "home"|"away",
+                                "duration": 120,
+                                "league":   {name} } ] }
+    """
     resp = _req.get(
         f"{_API_BASE}/matches",
         headers=_api_headers(),
-        params={"player_key": player_key, "status": "finished"},
+        params={"playerId": player_key, "status": "FT"},
         timeout=_TIMEOUT,
     )
     resp.raise_for_status()
-    raw = resp.json().get("result") or []
+    body = resp.json()
+    raw  = body.get("matches") or body.get("result") or []
 
     matches: list[dict] = []
     player_lower = full_name.lower()
 
+    player_lower = full_name.lower()
     for m in raw:
         if len(matches) >= _RECENT_LIMIT:
             break
-        home         = str(m.get("event_home_team") or "")
-        away         = str(m.get("event_away_team") or "")
-        winner_side  = str(m.get("event_winner") or "")
-        is_home      = player_lower in home.lower()
-        opponent     = away if is_home else home
 
-        if winner_side == "Home":
+        # tennisapi1 nested shape
+        home_obj    = m.get("homeTeam") or {}
+        away_obj    = m.get("awayTeam") or {}
+        league_obj  = m.get("league")   or {}
+        home        = str(home_obj.get("name") or m.get("event_home_team") or "")
+        away        = str(away_obj.get("name") or m.get("event_away_team") or "")
+        winner_side = str(m.get("winner")      or m.get("event_winner")   or "")
+        league_name = str(league_obj.get("name") or m.get("league_name")  or "")
+
+        is_home  = player_lower in home.lower()
+        opponent = away if is_home else home
+
+        # Normalise winner token ("home"/"away" or "Home"/"Away")
+        wl = winner_side.lower()
+        if wl == "home":
             result = "W" if is_home else "L"
-        elif winner_side == "Away":
+        elif wl == "away":
             result = "L" if is_home else "W"
         else:
-            continue
+            continue   # skip matches without a clear result
 
         raw_dur = (
-            m.get("event_time") or m.get("match_duration") or m.get("event_length")
+            m.get("duration") or m.get("event_time")
+            or m.get("match_duration") or m.get("event_length")
         )
         try:
             duration = max(30, int(raw_dur))
@@ -485,7 +532,7 @@ def _fetch_recent_matches(player_key: str, full_name: str) -> list[dict]:
             "opponent":     opponent or "Unknown",
             "duration_min": duration,
             "result":       result,
-            "surface":      _infer_surface(str(m.get("league_name") or "")),
+            "surface":      _infer_surface(league_name),
         })
 
     return matches
