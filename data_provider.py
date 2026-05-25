@@ -2,8 +2,8 @@
 Data provider for TennisIQ Analytics.
 
 Data-source ladder — evaluated in order on every call:
-  1. RapidAPI live  — schedule + player data   (requires RAPIDAPI_KEY env var)
-  2. Mock fallback  — static dataset + sample fixtures, always available
+  1. api-sports.io live  — schedule + player data   (requires APISPORTS_KEY env var)
+  2. Mock fallback       — static dataset + sample fixtures, always available
 
 Two independent caches live at module level:
   _LIVE_CACHE      — player dicts,  keyed by name.lower()
@@ -14,6 +14,12 @@ cleared automatically when the process restarts (deploy / dyno restart).
 
 Every public return value carries a '_data_source' key ("live" or "mock")
 so app.py can render a status badge without touching analytics.py.
+
+API: api-sports.io Tennis
+  Register free (no credit card) at: https://dashboard.api-sports.io/register
+  Base URL: https://v1.tennis.api-sports.io
+  Auth header: x-apisports-key: <YOUR_KEY>
+  Free plan: 100 requests / day
 """
 
 import os
@@ -32,14 +38,14 @@ except ImportError:
 # call via os.getenv() so that app.py can inject it from st.secrets at runtime
 # before the first API call is made.
 #
-# Host: tennisapi1.p.rapidapi.com  ("Tennis API" by solutionjet)
-#   Subscribe free at: https://rapidapi.com/solutionjet/api/tennis-api4
-#   Endpoint used for schedule:  GET /matches?status=NS&date=YYYY-MM-DD
+# Host: v1.tennis.api-sports.io  (api-sports.io Tennis)
+#   Register free at: https://dashboard.api-sports.io/register
+#   Endpoint used for schedule:  GET /games?date=YYYY-MM-DD
 #   Endpoint used for players:   GET /players?search=NAME
-_RAPIDAPI_HOST = "tennisapi1.p.rapidapi.com"
-_API_BASE      = f"https://{_RAPIDAPI_HOST}"
-_TIMEOUT       = 6   # seconds
-_RECENT_LIMIT  = 3   # recent matches to pull per player
+_API_HOST = "v1.tennis.api-sports.io"
+_API_BASE = f"https://{_API_HOST}"
+_TIMEOUT  = 8    # seconds
+_RECENT_LIMIT = 3  # recent matches to pull per player
 
 # ── Module-level caches ───────────────────────────────────────────────────────
 _LIVE_CACHE:     dict[str, dict]       = {}   # name.lower() → player dict
@@ -211,7 +217,7 @@ TOURNAMENT_SURFACES: dict[str, str] = {
     "Marseille":          "Hard (Indoor)",
 }
 
-# Keyword hints used by _infer_surface() to map raw API league names
+# Keyword hints used by _infer_surface() to map raw API tournament names
 _LEAGUE_SURFACE_HINTS: dict[str, str] = {
     "roland garros": "Clay", "french open": "Clay",
     "monte":  "Clay",  "madrid":   "Clay", "rome":  "Clay",
@@ -224,7 +230,6 @@ _LEAGUE_SURFACE_HINTS: dict[str, str] = {
 }
 
 # ── Sample fixtures — shown when the schedule API is unavailable ──────────────
-# Structured as realistic clay-season matches (late May).
 _MOCK_SCHEDULE: list[dict] = [
     {
         "label":      "J. Sinner vs C. Ruud",
@@ -260,16 +265,29 @@ _MOCK_SCHEDULE: list[dict] = [
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _api_headers() -> dict:
-    """Build request headers, reading the key fresh each time from the env."""
+    """Build request headers for api-sports.io, reading the key fresh each time."""
     return {
-        "x-rapidapi-key":  os.getenv("RAPIDAPI_KEY", ""),
-        "x-rapidapi-host": _RAPIDAPI_HOST,
+        "x-apisports-key": os.getenv("APISPORTS_KEY", ""),
     }
 
 
-def _infer_surface(league_name: str) -> str:
-    """Map a raw API league/tournament name to one of our surface strings."""
-    low = league_name.lower()
+def _has_key() -> bool:
+    """Return True if a non-empty API key is configured."""
+    return bool(os.getenv("APISPORTS_KEY")) and _REQUESTS_OK
+
+
+def _infer_surface(tournament_name: str, api_surface: str = "") -> str:
+    """
+    Determine surface from api-sports.io 'surface' field (preferred) or
+    keyword-match the tournament name as fallback.
+    """
+    # api-sports.io sometimes provides surface directly on the tournament object
+    if api_surface:
+        s = api_surface.strip().title()
+        if s in ("Clay", "Grass", "Hard", "Hard (Indoor)", "Hard (Outdoor)", "Carpet"):
+            return s
+
+    low = tournament_name.lower()
     for kw, surf in _LEAGUE_SURFACE_HINTS.items():
         if kw in low:
             return surf
@@ -287,19 +305,18 @@ def _abbreviate(full_name: str) -> str:
 def _build_fixture(
     p1_name: str, p1_key: Optional[str],
     p2_name: str, p2_key: Optional[str],
-    league: str,  time_str: str,
+    tournament: str, surface: str, time_str: str,
     source: str = "live",
 ) -> dict:
     """Assemble a normalised fixture dict from raw API field values."""
-    surface = _infer_surface(league)
-    label   = f"{_abbreviate(p1_name)} vs {_abbreviate(p2_name)}"
+    label = f"{_abbreviate(p1_name)} vs {_abbreviate(p2_name)}"
     return {
         "label":      label,
         "p1_name":    p1_name,
         "p1_key":     p1_key,
         "p2_name":    p2_name,
         "p2_key":     p2_key,
-        "tournament": league or "Unknown Tournament",
+        "tournament": tournament or "Unknown Tournament",
         "surface":    surface,
         "time":       time_str or "TBD",
         "_source":    source,
@@ -313,56 +330,83 @@ def _fetch_schedule_from_api(
     tournament_id: Optional[str],
 ) -> Optional[list[dict]]:
     """
-    Hit the /matches endpoint for scheduled (not-started) fixtures on
-    a given date.  Returns a list of normalised fixture dicts, or None
-    on any failure so get_daily_schedule() can fall back to mock data.
+    Hit the api-sports.io /games endpoint for not-started fixtures on a
+    given date.  Returns a list of normalised fixture dicts, or None on
+    any failure so get_daily_schedule() can fall back to mock data.
+
+    api-sports.io Tennis schedule:
+      GET /games?date=YYYY-MM-DD[&tournament=ID]
+      Auth: x-apisports-key header
+      Response:
+        {
+          "response": [
+            {
+              "id": 123,
+              "date": "2025-05-28T11:00:00+00:00",
+              "time": "11:00",
+              "tournament": {
+                "id": 1,
+                "name": "Roland Garros",
+                "surface": "Clay"
+              },
+              "teams": {
+                "home": {"id": 10, "name": "Jannik Sinner"},
+                "away": {"id": 20, "name": "Casper Ruud"}
+              },
+              "status": {"short": "NS", "long": "Not Started"}
+            }
+          ]
+        }
     """
-    if not os.getenv("RAPIDAPI_KEY") or not _REQUESTS_OK:
+    if not _has_key():
         return None
 
-    # tennisapi1 schedule format:
-    #   GET /matches?status=NS&date=YYYY-MM-DD[&leagueId=ID]
-    # Response: { "matches": [ { "homeTeam": {"name":...,"id":...},
-    #             "awayTeam": {"name":...,"id":...},
-    #             "league": {"name":..., "id":...},
-    #             "startTime": "11:00", "status": "NS" }, ... ] }
-    params: dict = {"status": "NS", "date": date_str}
+    params: dict = {"date": date_str}
     if tournament_id:
-        params["leagueId"] = tournament_id
+        params["tournament"] = tournament_id
 
     try:
         resp = _req.get(
-            f"{_API_BASE}/matches",
+            f"{_API_BASE}/games",
             headers=_api_headers(),
             params=params,
             timeout=_TIMEOUT,
         )
         resp.raise_for_status()
 
-        # tennisapi1 wraps results in "matches"; fall back to "result" for
-        # forward-compatibility in case the schema changes.
         body = resp.json()
-        raw  = body.get("matches") or body.get("result") or []
+        raw  = body.get("response") or []
 
         fixtures: list[dict] = []
         for m in raw:
-            # tennisapi1 nests teams as objects; also handle flat legacy shape
-            home_obj = m.get("homeTeam") or {}
-            away_obj = m.get("awayTeam") or {}
-            league_obj = m.get("league") or {}
-
-            home     = str(home_obj.get("name") or m.get("event_home_team") or "").strip()
-            away     = str(away_obj.get("name") or m.get("event_away_team") or "").strip()
-            home_key = str(home_obj.get("id")   or m.get("event_home_team_key") or "")
-            away_key = str(away_obj.get("id")   or m.get("event_away_team_key") or "")
-            league   = str(league_obj.get("name") or m.get("league_name") or "")
-            evt_time = str(m.get("startTime")   or m.get("event_time") or "")
-
-            if not home or not away:
+            # Skip matches that have already started or finished
+            status_short = str((m.get("status") or {}).get("short") or "")
+            if status_short not in ("NS", "", "TBD"):
                 continue
 
+            teams   = m.get("teams") or {}
+            home    = teams.get("home") or {}
+            away    = teams.get("away") or {}
+            tourn   = m.get("tournament") or {}
+
+            home_name = str(home.get("name") or "").strip()
+            away_name = str(away.get("name") or "").strip()
+            home_id   = str(home.get("id") or "")
+            away_id   = str(away.get("id") or "")
+            tourn_name = str(tourn.get("name") or "")
+            api_surf   = str(tourn.get("surface") or "")
+            time_str   = str(m.get("time") or "")
+
+            if not home_name or not away_name:
+                continue
+
+            surface = _infer_surface(tourn_name, api_surf)
             fixtures.append(
-                _build_fixture(home, home_key, away, away_key, league, evt_time)
+                _build_fixture(
+                    home_name, home_id,
+                    away_name, away_id,
+                    tourn_name, surface, time_str,
+                )
             )
 
         return fixtures if fixtures else None
@@ -389,9 +433,9 @@ def get_daily_schedule(
     Each dict contains:
         label      — display string  e.g. "J. Sinner vs C. Ruud"
         p1_name    — full first-player name
-        p1_key     — RapidAPI player key (None for mock fixtures)
+        p1_key     — api-sports.io player ID (None for mock fixtures)
         p2_name    — full second-player name
-        p2_key     — RapidAPI player key (None for mock fixtures)
+        p2_key     — api-sports.io player ID (None for mock fixtures)
         tournament — tournament name string
         surface    — inferred surface string
         time       — scheduled time string or "TBD"
@@ -405,7 +449,7 @@ def get_daily_schedule(
         return _SCHEDULE_CACHE[cache_key]
 
     live = _fetch_schedule_from_api(date, tournament_id)
-    if live is not None and len(live) > 0:
+    if live:
         _SCHEDULE_CACHE[cache_key] = live
         return live
 
@@ -419,7 +463,7 @@ def get_player(name: str) -> dict:
     """
     Return a player data dict suitable for analytics.compute_all().
 
-    Tries the RapidAPI live feed first; falls back to the mock dataset.
+    Tries the api-sports.io live feed first; falls back to the mock dataset.
     Raises ValueError only when no match is found in either source.
     """
     live = _fetch_live_player(name)
@@ -445,12 +489,21 @@ def list_players() -> list[str]:
 # ── Player API layer ──────────────────────────────────────────────────────────
 
 def _fetch_player_meta(name: str) -> Optional[tuple[str, str, int]]:
-    """Search API → (player_key, full_name, ranking) or None.
+    """
+    Search api-sports.io for a player → (player_id, full_name, ranking) or None.
 
-    tennisapi1 player search:
-      GET /players?search=NAME
-      Response: { "players": [ { "id": "...", "name": "...", "ranking": N } ] }
-    Also handles legacy flat shape for forward-compat.
+    GET /players?search=NAME
+    Response:
+      {
+        "response": [
+          {
+            "id": 1,
+            "name": "Jannik Sinner",
+            "ranking": 1,
+            "country": {"name": "Italy", "code": "IT"}
+          }
+        ]
+      }
     """
     resp = _req.get(
         f"{_API_BASE}/players",
@@ -460,69 +513,77 @@ def _fetch_player_meta(name: str) -> Optional[tuple[str, str, int]]:
     )
     resp.raise_for_status()
     body    = resp.json()
-    results = body.get("players") or body.get("result") or []
+    results = body.get("response") or []
     if not results:
         return None
     hit      = results[0]
-    key      = str(hit.get("id")          or hit.get("player_key")  or "")
-    fullname = str(hit.get("name")        or hit.get("player_name") or name)
-    ranking  = int(hit.get("ranking")     or hit.get("player_rank") or 0)
-    return (key, fullname, ranking) if key else None
+    pid      = str(hit.get("id") or "")
+    fullname = str(hit.get("name") or name)
+    ranking  = int(hit.get("ranking") or 0)
+    return (pid, fullname, ranking) if pid else None
 
 
-def _fetch_recent_matches(player_key: str, full_name: str) -> list[dict]:
-    """Fetch last _RECENT_LIMIT finished matches for a player.
+def _fetch_recent_matches(player_id: str, full_name: str) -> list[dict]:
+    """
+    Fetch last _RECENT_LIMIT finished matches for a player.
 
-    tennisapi1:  GET /matches?playerId=ID&status=FT
-    Response: { "matches": [ { "homeTeam": {name, id},
-                                "awayTeam": {name, id},
-                                "winner":   "home"|"away",
-                                "duration": 120,
-                                "league":   {name} } ] }
+    GET /games?player=PLAYER_ID&status=FT   (api-sports.io uses "FT" = full time)
+    Response:
+      {
+        "response": [
+          {
+            "teams": {
+              "home": {"id": 10, "name": "Jannik Sinner"},
+              "away": {"id": 20, "name": "Casper Ruud"}
+            },
+            "winner": {"id": 10, "name": "Jannik Sinner"},
+            "scores": {...},
+            "tournament": {"name": "Roland Garros", "surface": "Clay"},
+            "time": "11:00"
+          }
+        ]
+      }
     """
     resp = _req.get(
-        f"{_API_BASE}/matches",
+        f"{_API_BASE}/games",
         headers=_api_headers(),
-        params={"playerId": player_key, "status": "FT"},
+        params={"player": player_id, "status": "FT"},
         timeout=_TIMEOUT,
     )
     resp.raise_for_status()
     body = resp.json()
-    raw  = body.get("matches") or body.get("result") or []
+    raw  = body.get("response") or []
 
     matches: list[dict] = []
     player_lower = full_name.lower()
 
-    player_lower = full_name.lower()
     for m in raw:
         if len(matches) >= _RECENT_LIMIT:
             break
 
-        # tennisapi1 nested shape
-        home_obj    = m.get("homeTeam") or {}
-        away_obj    = m.get("awayTeam") or {}
-        league_obj  = m.get("league")   or {}
-        home        = str(home_obj.get("name") or m.get("event_home_team") or "")
-        away        = str(away_obj.get("name") or m.get("event_away_team") or "")
-        winner_side = str(m.get("winner")      or m.get("event_winner")   or "")
-        league_name = str(league_obj.get("name") or m.get("league_name")  or "")
+        teams  = m.get("teams") or {}
+        home   = teams.get("home") or {}
+        away   = teams.get("away") or {}
+        winner = m.get("winner") or {}
+        tourn  = m.get("tournament") or {}
 
-        is_home  = player_lower in home.lower()
-        opponent = away if is_home else home
+        home_name = str(home.get("name") or "")
+        away_name = str(away.get("name") or "")
+        win_id    = str(winner.get("id") or "")
+        home_id   = str(home.get("id") or "")
+        tourn_name = str(tourn.get("name") or "")
+        api_surf   = str(tourn.get("surface") or "")
 
-        # Normalise winner token ("home"/"away" or "Home"/"Away")
-        wl = winner_side.lower()
-        if wl == "home":
-            result = "W" if is_home else "L"
-        elif wl == "away":
-            result = "L" if is_home else "W"
-        else:
-            continue   # skip matches without a clear result
+        is_home  = player_lower in home_name.lower()
+        opponent = away_name if is_home else home_name
 
-        raw_dur = (
-            m.get("duration") or m.get("event_time")
-            or m.get("match_duration") or m.get("event_length")
-        )
+        # Determine win/loss from winner id
+        if not win_id or not (home_id or away_name):
+            continue
+        result = "W" if win_id == (home_id if is_home else str(away.get("id") or "")) else "L"
+
+        # Duration: api-sports.io may provide it in the game body
+        raw_dur = m.get("duration") or m.get("match_duration")
         try:
             duration = max(30, int(raw_dur))
         except (TypeError, ValueError):
@@ -532,7 +593,7 @@ def _fetch_recent_matches(player_key: str, full_name: str) -> list[dict]:
             "opponent":     opponent or "Unknown",
             "duration_min": duration,
             "result":       result,
-            "surface":      _infer_surface(league_name),
+            "surface":      _infer_surface(tourn_name, api_surf),
         })
 
     return matches
@@ -543,7 +604,7 @@ def _fetch_live_player(name: str) -> Optional[dict]:
     Full live-fetch pipeline: search → fetch matches → merge onto mock base.
     Returns player dict with '_data_source': 'live', or None on any failure.
     """
-    if not os.getenv("RAPIDAPI_KEY") or not _REQUESTS_OK:
+    if not _has_key():
         return None
 
     cache_key = name.lower()
@@ -554,9 +615,9 @@ def _fetch_live_player(name: str) -> Optional[dict]:
         meta = _fetch_player_meta(name)
         if not meta:
             return None
-        player_key, full_name, ranking = meta
+        player_id, full_name, ranking = meta
 
-        recent = _fetch_recent_matches(player_key, full_name)
+        recent = _fetch_recent_matches(player_id, full_name)
         if not recent:
             return None
 

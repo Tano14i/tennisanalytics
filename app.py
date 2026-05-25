@@ -17,8 +17,8 @@ from datetime import date as _date
 # data_provider.py reads the key via os.getenv() on every call, so we sync
 # st.secrets → os.environ here, once, before any data_provider import runs.
 try:
-    if "RAPIDAPI_KEY" in st.secrets and not os.environ.get("RAPIDAPI_KEY"):
-        os.environ["RAPIDAPI_KEY"] = st.secrets["RAPIDAPI_KEY"]
+    if "APISPORTS_KEY" in st.secrets and not os.environ.get("APISPORTS_KEY"):
+        os.environ["APISPORTS_KEY"] = st.secrets["APISPORTS_KEY"]
 except Exception:
     pass  # secrets not available (e.g. CLI run) — graceful no-op
 
@@ -72,7 +72,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption(
-        "Data: RapidAPI live when `RAPIDAPI_KEY` is set, "
+        "Data: api-sports.io live when `APISPORTS_KEY` is set, "
         "sample fixtures otherwise."
     )
 
@@ -112,11 +112,11 @@ if not schedule:
 # ── Data-source badge ─────────────────────────────────────────────────────────
 source = schedule[0].get("_source", "mock")
 if source == "live":
-    st.success("🟢 **Live data** — RapidAPI  •  Schedule updated in real time")
+    st.success("🟢 **Live data** — api-sports.io  •  Schedule updated in real time")
 else:
     st.warning(
-        "🟡 **Sample fixtures** — RapidAPI key not set or API unavailable.  "
-        "Set `RAPIDAPI_KEY` in Streamlit Secrets to enable live scheduling."
+        "🟡 **Sample fixtures** — API key not set or API unavailable.  "
+        "Set `APISPORTS_KEY` in Streamlit Secrets to enable live scheduling."
     )
 
 st.markdown("---")
