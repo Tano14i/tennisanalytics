@@ -297,6 +297,26 @@ def fit_games(Xg, yg, dates_g) -> dict | None:
     residual_std = (sum(r * r for r in residuals) / len(residuals)) ** 0.5 if residuals else 4.5
     val_mae = float(mean_absolute_error(yva, val_pred)) if Xva else None
 
+    # Deviazione standard SEPARATA per bo3/bo5: un match al meglio dei 5 set
+    # ha strutturalmente più varianza assoluta (più set = più eventi che
+    # sommano incertezza), non solo una media più alta. Una sigma unica
+    # sovrastima l'incertezza sui bo3 (la stragrande maggioranza dei match)
+    # e la sottostima sui bo5. Feature 3 = best_of_flag (0=bo3, 1=bo5).
+    # Sotto una soglia minima di campioni la stima per-formato è troppo
+    # rumorosa: si tiene la sigma unica (pooled) per quel formato.
+    MIN_SAMPLES_PER_FORMAT = 40
+    bo3_residuals = [r for r, x in zip(residuals, Xva) if x[3] < 0.5]
+    bo5_residuals = [r for r, x in zip(residuals, Xva) if x[3] >= 0.5]
+
+    def _std(vals, fallback):
+        if len(vals) < MIN_SAMPLES_PER_FORMAT:
+            return round(fallback, 3), len(vals), False
+        s = (sum(v * v for v in vals) / len(vals)) ** 0.5
+        return round(s, 3), len(vals), True
+
+    std_bo3, n_bo3, fitted_bo3 = _std(bo3_residuals, residual_std)
+    std_bo5, n_bo5, fitted_bo5 = _std(bo5_residuals, residual_std)
+
     # rifitta su tutti i dati per il modello finale (intercept/coef usati a runtime)
     final_model = LinearRegression()
     final_model.fit(Xg, yg)
@@ -310,11 +330,20 @@ def fit_games(Xg, yg, dates_g) -> dict | None:
         "intercept": round(float(final_model.intercept_), 4),
         "coef": [round(float(c), 5) for c in final_model.coef_],
         "feature_names": ["avg_games_prior_centered", "abs_rank_gap", "abs_surface_gap", "best_of_flag"],
-        "residual_std": round(residual_std, 3),
+        "residual_std": round(residual_std, 3),  # pooled, tenuta per retrocompat
+        "residual_std_bo3": std_bo3,
+        "residual_std_bo5": std_bo5,
         "n_samples": n,
+        "n_val_bo3": n_bo3, "n_val_bo5": n_bo5,
         "val_mae_games": round(val_mae, 3) if val_mae is not None else None,
         "trained_at": datetime.now(timezone.utc).isoformat(),
-        "note": "Target: total games reali (score completi). Holdout 20% finale per residual_std e MAE.",
+        "note": (
+            "Target: total games reali (score completi). Holdout 20% finale per "
+            "residual_std/MAE. residual_std_bo3/bo5 separate se >= "
+            f"{MIN_SAMPLES_PER_FORMAT} campioni holdout per formato "
+            f"(bo3 fitted={fitted_bo3}, bo5 fitted={fitted_bo5}), altrimenti "
+            "pooled come fallback."
+        ),
     }
 
 
@@ -359,8 +388,10 @@ def main() -> int:
         print("\n── Pesi fittati (games O/U) ──")
         print(f"  intercept (games medi base) = {games_result['intercept']}")
         print(f"  coef {games_result['feature_names']} = {games_result['coef']}")
-        print(f"  residual_std (σ)  = {games_result['residual_std']}")
-        print(f"  val MAE (games)   = {games_result['val_mae_games']}")
+        print(f"  residual_std pooled (σ) = {games_result['residual_std']}")
+        print(f"  residual_std bo3 (σ)    = {games_result['residual_std_bo3']} (n={games_result['n_val_bo3']})")
+        print(f"  residual_std bo5 (σ)    = {games_result['residual_std_bo5']} (n={games_result['n_val_bo5']})")
+        print(f"  val MAE (games)         = {games_result['val_mae_games']}")
         print(f"Scritto {args.games_out}.")
 
     print("\nbetting.py caricherà entrambi in automatico.")

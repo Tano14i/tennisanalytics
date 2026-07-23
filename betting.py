@@ -317,14 +317,19 @@ _GAMES_PRIOR_STD = 4.5
 
 _GAMES_INTERCEPT = _GAMES_PRIOR_MEAN
 _GAMES_COEF = [1.0, 0.0, 0.0, 0.0]  # [avg_games_prior, |rank_diff|, |surface_diff|, best_of_flag]
-_GAMES_STD = _GAMES_PRIOR_STD
+# Sigma per formato: un match bo5 ha strutturalmente più varianza assoluta
+# di un bo3 (più set = più eventi che sommano incertezza), non solo una
+# media più alta — una sigma unica sovrastimerebbe l'incertezza sui bo3 (la
+# stragrande maggioranza dei match) e la sottostimerebbe sui bo5.
+_GAMES_STD_BO3 = _GAMES_PRIOR_STD
+_GAMES_STD_BO5 = _GAMES_PRIOR_STD
 GAMES_SOURCE = "prior"
 
 _GAMES_WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "games_weights.json")
 
 
 def _load_games_weights() -> None:
-    global _GAMES_INTERCEPT, _GAMES_COEF, _GAMES_STD, GAMES_SOURCE
+    global _GAMES_INTERCEPT, _GAMES_COEF, _GAMES_STD_BO3, _GAMES_STD_BO5, GAMES_SOURCE
     if not os.path.exists(_GAMES_WEIGHTS_PATH):
         return
     try:
@@ -337,13 +342,21 @@ def _load_games_weights() -> None:
         while len(coef) < 4:
             coef.append(0.0)
         _GAMES_COEF = coef
-        _GAMES_STD = float(w["residual_std"])
+        # retrocompat: file generati prima della sigma per-formato hanno solo
+        # "residual_std" (pooled) → usata per entrambi i formati.
+        pooled = float(w.get("residual_std", _GAMES_PRIOR_STD))
+        _GAMES_STD_BO3 = float(w.get("residual_std_bo3", pooled))
+        _GAMES_STD_BO5 = float(w.get("residual_std_bo5", pooled))
         GAMES_SOURCE = "fitted"
     except Exception:
         pass
 
 
 _load_games_weights()
+
+
+def _games_std(best_of: int) -> float:
+    return _GAMES_STD_BO5 if best_of >= 5 else _GAMES_STD_BO3
 
 
 def _norm_cdf(x: float, mean: float, std: float) -> float:
@@ -386,11 +399,12 @@ def evaluate_games_value(
     """Valuta Over/Under `line` games totali (es. 22.5) per un match al
     meglio di `best_of` set."""
     mean = expected_total_games(p1_stats, p2_stats, best_of)
-    p_under = _norm_cdf(line, mean, _GAMES_STD)
+    std = _games_std(best_of)
+    p_under = _norm_cdf(line, mean, std)
     p_over = 1.0 - p_under
     tag = "fitted" if GAMES_SOURCE == "fitted" else "heuristic prior"
     result = {
-        "line": line, "expected_games": round(mean, 1), "std": round(_GAMES_STD, 2),
+        "line": line, "expected_games": round(mean, 1), "std": round(std, 2),
         "prob_over": round(p_over, 4), "prob_under": round(p_under, 4),
         "source": tag,
         "has_odds": False, "odds_over": odds_over, "odds_under": odds_under,
