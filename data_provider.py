@@ -15,11 +15,14 @@ cleared automatically when the process restarts (deploy / dyno restart).
 Every public return value carries a '_data_source' key ("live" or "mock")
 so app.py can render a status badge without touching analytics.py.
 
-API: api-sports.io Tennis
-  Register free (no credit card) at: https://dashboard.api-sports.io/register
-  Base URL: https://v1.tennis.api-sports.io
-  Auth header: x-apisports-key: <YOUR_KEY>
-  Free plan: 100 requests / day
+Tennis schedule API (optional, live fixtures):
+  The host is configurable via env vars — the historical default
+  (v1.tennis.api-sports.io) is NOT guaranteed to be a live product, so
+  verify yours before relying on live mode:
+      python data_provider.py --check-api
+  Env: TENNIS_API_HOST, TENNIS_API_KEY (or APISPORTS_KEY), TENNIS_API_KEY_HEADER.
+  Player STATISTICS do not depend on this API — they come from the offline
+  dataset built by build_dataset.py (real) or the mock fallback.
 """
 
 import json
@@ -35,18 +38,41 @@ except ImportError:
     _REQUESTS_OK = False
 
 # ── API configuration ─────────────────────────────────────────────────────────
-# Key is intentionally NOT cached at module level — it is read fresh on every
-# call via os.getenv() so that app.py can inject it from st.secrets at runtime
-# before the first API call is made.
+# Host, key and auth header are read fresh on every call from the environment,
+# so app.py can inject them from st.secrets at runtime and so the provider can
+# be repointed WITHOUT editing code.
 #
-# Host: v1.tennis.api-sports.io  (api-sports.io Tennis)
-#   Register free at: https://dashboard.api-sports.io/register
-#   Endpoint used for schedule:  GET /games?date=YYYY-MM-DD
-#   Endpoint used for players:   GET /players?search=NAME
-_API_HOST = "v1.tennis.api-sports.io"
-_API_BASE = f"https://{_API_HOST}"
+# IMPORTANT: the historical default host (v1.tennis.api-sports.io) may not be a
+# live product — api-sports.io's catalogue is football/basket/F1/NFL/etc., and
+# tennis is not guaranteed. Run the diagnostic to check YOUR key+host:
+#     python data_provider.py --check-api
+# If it fails, point TENNIS_API_HOST at a tennis API that actually works
+# (e.g. api-tennis.com or a RapidAPI tennis endpoint) — same header-key shape.
+#
+# Env vars:
+#   TENNIS_API_HOST      host without scheme (default v1.tennis.api-sports.io)
+#   TENNIS_API_KEY       API key (falls back to APISPORTS_KEY for compatibility)
+#   TENNIS_API_KEY_HEADER  auth header name (default x-apisports-key)
+_DEFAULT_API_HOST   = "v1.tennis.api-sports.io"
+_DEFAULT_KEY_HEADER = "x-apisports-key"
 _TIMEOUT  = 8    # seconds
 _RECENT_LIMIT = 3  # recent matches to pull per player
+
+
+def _api_host() -> str:
+    return os.getenv("TENNIS_API_HOST", _DEFAULT_API_HOST).strip() or _DEFAULT_API_HOST
+
+
+def _api_base() -> str:
+    return f"https://{_api_host()}"
+
+
+def _api_key() -> str:
+    return (os.getenv("TENNIS_API_KEY") or os.getenv("APISPORTS_KEY") or "").strip()
+
+
+def _key_header() -> str:
+    return os.getenv("TENNIS_API_KEY_HEADER", _DEFAULT_KEY_HEADER).strip() or _DEFAULT_KEY_HEADER
 
 # ── Module-level caches ───────────────────────────────────────────────────────
 _LIVE_CACHE:     dict[str, dict]       = {}   # name.lower() → player dict
@@ -314,15 +340,57 @@ _MOCK_SCHEDULE: list[dict] = [
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _api_headers() -> dict:
-    """Build request headers for api-sports.io, reading the key fresh each time."""
-    return {
-        "x-apisports-key": os.getenv("APISPORTS_KEY", ""),
-    }
+    """Build request headers for the tennis API, reading key+header fresh."""
+    return {_key_header(): _api_key()}
 
 
 def _has_key() -> bool:
-    """Return True if a non-empty API key is configured."""
-    return bool(os.getenv("APISPORTS_KEY")) and _REQUESTS_OK
+    """Return True if a non-empty API key is configured and requests is available."""
+    return bool(_api_key()) and _REQUESTS_OK
+
+
+def diagnose_api() -> dict:
+    """
+    Ping the configured tennis API and report exactly what happens, so the
+    'does this API even exist / is my key valid' question answers itself.
+
+    Returns a dict: {ok, host, reason, http_status, sample_count}.
+    """
+    host = _api_host()
+    result = {"ok": False, "host": host, "reason": "", "http_status": None, "sample_count": 0}
+    if not _REQUESTS_OK:
+        result["reason"] = "modulo 'requests' non installato"
+        return result
+    if not _api_key():
+        result["reason"] = "nessuna API key (imposta TENNIS_API_KEY o APISPORTS_KEY)"
+        return result
+    today = _date.today().strftime("%Y-%m-%d")
+    try:
+        resp = _req.get(
+            f"{_api_base()}/games",
+            headers=_api_headers(),
+            params={"date": today},
+            timeout=_TIMEOUT,
+        )
+        result["http_status"] = resp.status_code
+        if resp.status_code != 200:
+            result["reason"] = f"HTTP {resp.status_code} — host/endpoint o chiave non validi"
+            return result
+        try:
+            body = resp.json()
+        except ValueError:
+            result["reason"] = "risposta non-JSON — l'host non è un'API tennis compatibile"
+            return result
+        if not isinstance(body, dict) or "response" not in body:
+            result["reason"] = "JSON senza campo 'response' — schema API diverso da quello atteso"
+            return result
+        result["ok"] = True
+        result["sample_count"] = len(body.get("response") or [])
+        result["reason"] = "OK"
+        return result
+    except Exception as exc:
+        result["reason"] = f"connessione fallita: {exc!r}"
+        return result
 
 
 def _infer_surface(tournament_name: str, api_surface: str = "") -> str:
@@ -416,7 +484,7 @@ def _fetch_schedule_from_api(
 
     try:
         resp = _req.get(
-            f"{_API_BASE}/games",
+            f"{_api_base()}/games",
             headers=_api_headers(),
             params=params,
             timeout=_TIMEOUT,
@@ -555,7 +623,7 @@ def _fetch_player_meta(name: str) -> Optional[tuple[str, str, int]]:
       }
     """
     resp = _req.get(
-        f"{_API_BASE}/players",
+        f"{_api_base()}/players",
         headers=_api_headers(),
         params={"search": name},
         timeout=_TIMEOUT,
@@ -594,7 +662,7 @@ def _fetch_recent_matches(player_id: str, full_name: str) -> list[dict]:
       }
     """
     resp = _req.get(
-        f"{_API_BASE}/games",
+        f"{_api_base()}/games",
         headers=_api_headers(),
         params={"player": player_id, "status": "FT"},
         timeout=_TIMEOUT,
@@ -708,3 +776,29 @@ def _fuzzy_match(name: str) -> Optional[str]:
         if nl in key.lower() or nl in data["full_name"].lower():
             return key
     return None
+
+
+# ── CLI diagnostic ────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import sys
+
+    if "--check-api" in sys.argv:
+        d = diagnose_api()
+        print("── Tennis API check ──")
+        print(f"host        : {d['host']}")
+        print(f"http_status : {d['http_status']}")
+        print(f"esito       : {'OK ✅' if d['ok'] else 'FALLITO ❌'}")
+        print(f"dettaglio   : {d['reason']}")
+        if d["ok"]:
+            print(f"fixture oggi: {d['sample_count']}")
+        else:
+            print()
+            print("Se l'host di default non è un'API tennis valida, imposta:")
+            print("  export TENNIS_API_HOST=host.della.tua.api      (senza https://)")
+            print("  export TENNIS_API_KEY=la_tua_chiave")
+            print("  export TENNIS_API_KEY_HEADER=x-apisports-key    (o l'header richiesto)")
+            print("Le statistiche giocatore restano comunque reali via build_dataset.py.")
+        sys.exit(0 if d["ok"] else 1)
+
+    print("Uso: python data_provider.py --check-api")
+    sys.exit(2)
