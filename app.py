@@ -184,9 +184,14 @@ if gen_btn:
 if st.session_state.report:
     st.success("✅ Report generated — copy and paste below!")
 
-    # Data-source sub-badge inside the report section
-    p1_src = "🟢 Live" if fixture.get("_source") == "live" else "🟡 Mock"
-    st.caption(f"Player data source: {p1_src}")
+    # Honest data-source breakdown: the schedule can be live while the player
+    # statistics come from the static dataset (real Sackmann data or mock).
+    sched_src = "🟢 Live" if fixture.get("_source") == "live" else "🟡 Sample"
+    if dp.STATIC_DATA_SOURCE == "sackmann":
+        stats_src = "🟢 Real (ATP historical data)"
+    else:
+        stats_src = "🟡 Mock (run build_dataset.py for real stats)"
+    st.caption(f"Schedule: {sched_src}  •  Player stats: {stats_src}")
 
     st.text_area(
         label="Copy directly to your Telegram / Discord channel:",
