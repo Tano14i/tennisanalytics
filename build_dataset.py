@@ -132,6 +132,7 @@ def _blank_player(name: str) -> dict:
     return {
         "full_name": name,
         "ranking": 0,
+        "latest_date": None,  # data del match più recente visto (per il ranking)
         "match_count": 0,
         "recent_raw": [],  # (date, surface, minutes, result) — ridotto dopo
         "surface_records": defaultdict(lambda: {"wins": 0, "losses": 0}),
@@ -159,12 +160,20 @@ def _ingest_match(players: dict, row: dict) -> None:
     w_tb_played, w_tb_won = _count_tiebreaks(score, player_is_winner=True)
     l_tb_played, l_tb_won = _count_tiebreaks(score, player_is_winner=False)
 
-    for name, is_winner in ((w_name, True), (l_name, False)):
+    w_rank = _to_int(row.get("winner_rank"))
+    l_rank = _to_int(row.get("loser_rank"))
+
+    for name, is_winner, rank in ((w_name, True, w_rank), (l_name, False, l_rank)):
         p = players.setdefault(name, _blank_player(name))
         p["match_count"] += 1
         rec = p["surface_records"][surface]
         rec["wins" if is_winner else "losses"] += 1
         p["recent_raw"].append((date, surface, minutes, "W" if is_winner else "L"))
+        # ranking = quello del match più recente per cui il dato è presente
+        if rank > 0 and (p["latest_date"] is None or (date and date >= p["latest_date"])):
+            p["ranking"] = rank
+            if date:
+                p["latest_date"] = date
 
         if is_winner:
             # BP subiti/salvati dal vincitore = w_bp*; BP che il vincitore ha
@@ -204,7 +213,7 @@ def _finalize(players: dict, top: int) -> dict:
         short_key = p["full_name"].split()[-1]  # cognome come chiave breve
         out[short_key] = {
             "full_name": p["full_name"],
-            "ranking": 0,
+            "ranking": p["ranking"],
             "recent_matches": recent_matches,
             "surface_records": {k: dict(v) for k, v in p["surface_records"].items()},
             "break_points": {

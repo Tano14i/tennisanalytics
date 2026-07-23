@@ -61,9 +61,10 @@ confronta con la probabilità implicita del bookmaker (margine rimosso) e
 calcola l'**EV**: un lato è "value pick" solo se `prob × quota − 1` supera il
 margine minimo. Senza quote non c'è scommessa valutabile, solo analisi.
 
-Il modello di probabilità (`betting.py`) è una combinazione logistica dei
-differenziali di metrica. Di default usa pesi-prior euristici; per **calibrarlo
-sui dati reali** genera i pesi fittati:
+Il modello di probabilità (`betting.py`) è una combinazione logistica di quattro
+differenziali: **ranking** (log-rank, il predittore più forte nel tennis), record
+per superficie, forma e clutch. Di default usa pesi-prior euristici; per
+**calibrarlo sui dati reali** genera i pesi fittati:
 
 ```bash
 python fit_weights.py --years 8

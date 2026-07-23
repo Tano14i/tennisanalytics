@@ -26,6 +26,7 @@ import sys
 from datetime import datetime, timezone
 
 import analytics
+from betting import rank_feature
 from build_dataset import (
     _canon_surface,
     _count_tiebreaks,
@@ -129,6 +130,9 @@ def build_samples(rows: list[dict]):
         l_bp_saved, l_bp_faced = _to_int(r.get("l_bpSaved")), _to_int(r.get("l_bpFaced"))
         w_tb_played, w_tb_won = _count_tiebreaks(score, True)
         l_tb_played, l_tb_won = _count_tiebreaks(score, False)
+        # ranking al momento del match (colonne winner_rank/loser_rank): è
+        # informazione pre-partita, quindi nessun leakage.
+        w_rank, l_rank = _to_int(r.get("winner_rank")), _to_int(r.get("loser_rank"))
 
         ws = state.get(w)
         ls = state.get(l)
@@ -138,13 +142,14 @@ def build_samples(rows: list[dict]):
             w_stats = analytics.compute_all(ws, surface)
             l_stats = analytics.compute_all(ls, surface)
             if _orientation(r.get("tourney_date", ""), w, l) == 0:
-                p1, p2, target = w_stats, l_stats, 1
+                p1, p2, r1, r2, target = w_stats, l_stats, w_rank, l_rank, 1
             else:
-                p1, p2, target = l_stats, w_stats, 0
+                p1, p2, r1, r2, target = l_stats, w_stats, l_rank, w_rank, 0
             X.append([
                 p1["surface_win_rate"] - p2["surface_win_rate"],
                 p1["momentum_score"] - p2["momentum_score"],
                 p1["clutch_factor"] - p2["clutch_factor"],
+                rank_feature(r1, r2),
             ])
             y.append(target)
             dates.append(date or datetime.min)
@@ -213,6 +218,7 @@ def fit(X, y, dates) -> dict:
         "w_surface": round(float(coef[0]), 6),
         "w_momentum": round(float(coef[1]), 6),
         "w_clutch": round(float(coef[2]), 6),
+        "w_rank": round(float(coef[3]), 6),
         "n_samples": len(X),
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "train_metrics": train_metrics,
@@ -246,6 +252,7 @@ def main() -> int:
     print(f"  w_surface  = {result['w_surface']}")
     print(f"  w_momentum = {result['w_momentum']}")
     print(f"  w_clutch   = {result['w_clutch']}")
+    print(f"  w_rank     = {result['w_rank']}")
     print(f"  train: {result['train_metrics']}")
     print(f"  val  : {result['val_metrics']}")
     print(f"\nScritto {args.out}. betting.py li caricherà in automatico.")

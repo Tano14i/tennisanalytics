@@ -171,6 +171,8 @@ if gen_btn:
 
             p1_stats = an.compute_all(p1_data, fixture["surface"])
             p2_stats = an.compute_all(p2_data, fixture["surface"])
+            p1_stats["ranking"] = p1_data.get("ranking", 0)
+            p2_stats["ranking"] = p2_data.get("ranking", 0)
 
             # Extract short keys (e.g. "Sinner") for the insight engine.
             # Fall back to the full name if no short key is found in PLAYERS.

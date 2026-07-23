@@ -224,6 +224,8 @@ def main() -> None:
     # Compute metrics
     p1_stats = analytics.compute_all(p1_data, surface)
     p2_stats = analytics.compute_all(p2_data, surface)
+    p1_stats["ranking"] = p1_data.get("ranking", 0)
+    p2_stats["ranking"] = p2_data.get("ranking", 0)
 
     # Render and print
     post = format_post(

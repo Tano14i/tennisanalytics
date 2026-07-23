@@ -24,11 +24,13 @@ import os
 _PRIOR_W_SURFACE = 0.030
 _PRIOR_W_MOMENTUM = 0.015
 _PRIOR_W_CLUTCH = 0.022
+_PRIOR_W_RANK = 0.300   # feature log-rank (~-4..+4): il predittore piu' forte
 
 # Pesi attivi: prior finché fit_weights.py non genera betting_weights.json.
 _W_SURFACE = _PRIOR_W_SURFACE
 _W_MOMENTUM = _PRIOR_W_MOMENTUM
 _W_CLUTCH = _PRIOR_W_CLUTCH
+_W_RANK = _PRIOR_W_RANK
 WEIGHTS_SOURCE = "prior"  # "fitted" quando caricati da betting_weights.json
 
 _WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "betting_weights.json")
@@ -37,7 +39,7 @@ _WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bettin
 def _load_fitted_weights() -> None:
     """Carica i pesi fittati da betting_weights.json (walk-forward, senza
     leakage) se il file esiste. Altrimenti restano i prior."""
-    global _W_SURFACE, _W_MOMENTUM, _W_CLUTCH, WEIGHTS_SOURCE
+    global _W_SURFACE, _W_MOMENTUM, _W_CLUTCH, _W_RANK, WEIGHTS_SOURCE
     if not os.path.exists(_WEIGHTS_PATH):
         return
     try:
@@ -46,12 +48,29 @@ def _load_fitted_weights() -> None:
         _W_SURFACE = float(w["w_surface"])
         _W_MOMENTUM = float(w["w_momentum"])
         _W_CLUTCH = float(w["w_clutch"])
+        # w_rank opzionale: pesi fittati vecchi (senza ranking) restano validi.
+        _W_RANK = float(w.get("w_rank", 0.0))
         WEIGHTS_SOURCE = "fitted"
     except Exception:
         pass  # file corrotto → resta sui prior
 
 
 _load_fitted_weights()
+
+
+def rank_feature(rank1, rank2) -> float:
+    """Feature di ranking = log(rank2) - log(rank1): positiva quando player1 è
+    meglio classificato (numero di ranking più basso). Scala logaritmica perché
+    la differenza 1→5 pesa molto più di 100→104. Ritorna 0 se un ranking manca
+    o è 0 (giocatore non classificato) → nessun contributo, mai un falso segnale."""
+    try:
+        r1 = int(rank1 or 0)
+        r2 = int(rank2 or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if r1 <= 0 or r2 <= 0:
+        return 0.0
+    return math.log(r2) - math.log(r1)
 
 # La probabilità del modello è troncata per non dare mai certezza estrema.
 _PROB_FLOOR = 0.05
@@ -73,8 +92,14 @@ def win_probability(p1_stats: dict, p2_stats: dict) -> tuple[float, float]:
     surf_diff = p1_stats.get("surface_win_rate", 0.0) - p2_stats.get("surface_win_rate", 0.0)
     mom_diff = p1_stats.get("momentum_score", 0.0) - p2_stats.get("momentum_score", 0.0)
     clutch_diff = p1_stats.get("clutch_factor", 0.0) - p2_stats.get("clutch_factor", 0.0)
+    rank_diff = rank_feature(p1_stats.get("ranking", 0), p2_stats.get("ranking", 0))
 
-    logit = _W_SURFACE * surf_diff + _W_MOMENTUM * mom_diff + _W_CLUTCH * clutch_diff
+    logit = (
+        _W_SURFACE * surf_diff
+        + _W_MOMENTUM * mom_diff
+        + _W_CLUTCH * clutch_diff
+        + _W_RANK * rank_diff
+    )
     p1 = min(_PROB_CEIL, max(_PROB_FLOOR, _sigmoid(logit)))
     return round(p1, 4), round(1.0 - p1, 4)
 
