@@ -22,6 +22,7 @@ API: api-sports.io Tennis
   Free plan: 100 requests / day
 """
 
+import json
 import os
 import warnings
 from datetime import date as _date
@@ -190,6 +191,54 @@ PLAYERS: dict[str, dict] = {
         "tiebreaks":          {"played": 28, "won": 12},
     },
 }
+
+# ── Real dataset overlay ──────────────────────────────────────────────────────
+# players_data.json (generato da build_dataset.py sui match ATP reali di
+# Sackmann) sovrascrive i mock qui sopra. Se il file non esiste, il tool resta
+# funzionante con gli 8 giocatori d'esempio finche' non lo si genera.
+_DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "players_data.json")
+# "sackmann" quando i record provengono dal dataset reale, "mock" altrimenti.
+STATIC_DATA_SOURCE = "mock"
+
+
+def _load_real_dataset() -> None:
+    global STATIC_DATA_SOURCE
+    if not os.path.exists(_DATASET_PATH):
+        return
+    try:
+        with open(_DATASET_PATH, encoding="utf-8") as fh:
+            real = json.load(fh)
+    except Exception as exc:
+        warnings.warn(f"[TennisIQ] players_data.json illeggibile: {exc!r}. Uso i mock.",
+                      RuntimeWarning, stacklevel=2)
+        return
+    if isinstance(real, dict) and real:
+        PLAYERS.update(real)         # i dati reali hanno la precedenza sui mock
+        STATIC_DATA_SOURCE = "sackmann"
+
+
+_load_real_dataset()
+
+# Campi che analytics.compute_all() richiede sempre presenti.
+_REQUIRED_PLAYER_KEYS = {
+    "recent_matches":     list,
+    "surface_records":    dict,
+    "break_points":       lambda: {"opportunities": 0, "converted": 0},
+    "break_points_saved": lambda: {"faced": 0, "saved": 0},
+    "tiebreaks":          lambda: {"played": 0, "won": 0},
+}
+
+
+def _ensure_player_shape(record: dict) -> dict:
+    """Riempie i campi mancanti con default sicuri: evita KeyError in analytics
+    quando un giocatore live non ha una base mock corrispondente."""
+    for key, factory in _REQUIRED_PLAYER_KEYS.items():
+        if not isinstance(record.get(key), (list, dict)):
+            record[key] = factory()
+    record.setdefault("full_name", "Unknown")
+    record.setdefault("ranking", 0)
+    return record
+
 
 # ── Tournament → Surface mapping ──────────────────────────────────────────────
 TOURNAMENT_SURFACES: dict[str, str] = {
@@ -477,8 +526,8 @@ def get_player(name: str) -> dict:
             f"Available: {', '.join(PLAYERS.keys())}"
         )
     record = dict(PLAYERS[key])
-    record.setdefault("_data_source", "mock")
-    return record
+    record.setdefault("_data_source", STATIC_DATA_SOURCE)
+    return _ensure_player_shape(record)
 
 
 def list_players() -> list[str]:
@@ -623,13 +672,17 @@ def _fetch_live_player(name: str) -> Optional[dict]:
 
         mock_key = _fuzzy_match(name)
         base     = dict(PLAYERS[mock_key]) if mock_key else {}
-        record   = {
+        record   = _ensure_player_shape({
             **base,
             "full_name":      full_name,
             "ranking":        ranking or base.get("ranking", 0),
             "recent_matches": recent,
+            # 'live' = calendario+forma recente dall'API; i record storici
+            # (superficie, clutch) restano dal dataset se il giocatore c'e',
+            # altrimenti sono vuoti (nuovo entrato non ancora nel dataset).
             "_data_source":   "live",
-        }
+            "_stats_source":  base.get("_data_source", "none") if base else "none",
+        })
         _LIVE_CACHE[cache_key] = record
         return record
 
