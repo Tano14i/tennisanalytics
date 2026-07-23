@@ -144,12 +144,13 @@ def format_post(p1_name: str, p1_full: str, p1_stats: dict,
                 odds_straight_sets: float | None = None, odds_extra_sets: float | None = None) -> str:
 
     insight = build_insight(p1_name, p1_stats, p2_name, p2_stats, surface)
-    ev = betting.evaluate_value(p1_full, p1_stats, p2_full, p2_stats, odds1, odds2)
 
     # Slam maschili (AO/RG/Wimbledon/US Open) = best-of-5, tutto il resto
-    # best-of-3: la struttura del match (lunghezza, distribuzione set/games)
-    # è radicalmente diversa e i due mercati sotto devono saperlo.
+    # best-of-3: la struttura del match (lunghezza, distribuzione set/games,
+    # e la stessa probabilità di vittoria) è radicalmente diversa e sia il
+    # modello vincente sia i due mercati sotto devono saperlo.
     best_of = dp.best_of_for_tournament(tournament)
+    ev = betting.evaluate_value(p1_full, p1_stats, p2_full, p2_stats, odds1, odds2, best_of=best_of)
 
     # Games O/U e set usano la stessa linea "moneyline probability" del match
     # come input al modello dei set; games_line di default = 22.5 se non data.

@@ -241,6 +241,8 @@ def run_backtest(tml_rows: list[dict], odds_index: dict, min_edge: float) -> dic
         ws = state.get(w)
         ls = state.get(l)
 
+        match_best_of = best_of if best_of in (3, 5) else 3
+
         if ws and ls and ws["match_count"] >= MIN_HISTORY and ls["match_count"] >= MIN_HISTORY and date:
             odds = match_odds_for_tml_row(odds_index, w, l, date, used_odds_ids)
             if odds:
@@ -251,7 +253,7 @@ def run_backtest(tml_rows: list[dict], odds_index: dict, min_edge: float) -> dic
                 w_stats["games_avg"] = _games_avg(ws)
                 l_stats["games_avg"] = _games_avg(ls)
 
-                p_winner, p_loser = betting.win_probability(w_stats, l_stats)
+                p_winner, p_loser = betting.win_probability(w_stats, l_stats, best_of=match_best_of)
                 ev_winner = betting.expected_value(p_winner, odds["odds_winner"])
                 ev_loser = betting.expected_value(p_loser, odds["odds_loser"])
 
@@ -265,7 +267,7 @@ def run_backtest(tml_rows: list[dict], odds_index: dict, min_edge: float) -> dic
                     won = bet_side == "winner"  # il modello punta sul lato; l'esito reale è noto
                     profit = (bet_odds - 1.0) if won else -1.0
                     bets.append({
-                        "year": date.year, "best_of": best_of if best_of in (3, 5) else 3,
+                        "year": date.year, "best_of": match_best_of,
                         "profit": profit, "won": won,
                         "ev": ev_winner if bet_side == "winner" else ev_loser,
                         "odds_source": odds["odds_source"],

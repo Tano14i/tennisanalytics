@@ -84,10 +84,22 @@ def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def win_probability(p1_stats: dict, p2_stats: dict) -> tuple[float, float]:
+def win_probability(p1_stats: dict, p2_stats: dict, best_of: int = 3) -> tuple[float, float]:
     """
     Stima P(player1 vince) e P(player2 vince) dai differenziali di metrica.
     Ritorna (p1_prob, p2_prob) con p1_prob + p2_prob == 1.
+
+    I pesi sono fittati (o i prior lo assumono) su un dataset dominato da
+    match best-of-3 (~93% dei campioni in fit_weights.py): l'output grezzo
+    della logistica è quindi una stima "bo3-equivalente". Un match al meglio
+    dei 5 set (Slam maschili) ha strutturalmente meno varianza — a parità di
+    vantaggio per set, il favorito vince il match più spesso — quindi per
+    best_of>=5 la probabilità viene riespansa con la stessa trasformazione
+    combinatoria del mercato Set (vedi implied_set_win_prob /
+    _match_win_prob_from_set_prob più sotto): converte la stima bo3 nella
+    probabilità per-set implicita, poi la ricompone per il formato reale.
+    Senza questo passaggio il modello sottostima sistematicamente i favoriti
+    negli Slam (verificato: backtest storico, ROI molto peggiore su bo5).
     """
     surf_diff = p1_stats.get("surface_win_rate", 0.0) - p2_stats.get("surface_win_rate", 0.0)
     mom_diff = p1_stats.get("momentum_score", 0.0) - p2_stats.get("momentum_score", 0.0)
@@ -100,7 +112,13 @@ def win_probability(p1_stats: dict, p2_stats: dict) -> tuple[float, float]:
         + _W_CLUTCH * clutch_diff
         + _W_RANK * rank_diff
     )
-    p1 = min(_PROB_CEIL, max(_PROB_FLOOR, _sigmoid(logit)))
+    p1_raw = _sigmoid(logit)
+
+    if best_of and best_of >= 5:
+        q = implied_set_win_prob(p1_raw, best_of=3)
+        p1_raw = _match_win_prob_from_set_prob(q, best_of=best_of)
+
+    p1 = min(_PROB_CEIL, max(_PROB_FLOOR, p1_raw))
     return round(p1, 4), round(1.0 - p1, 4)
 
 
@@ -132,6 +150,7 @@ def evaluate_value(
     p2_name: str, p2_stats: dict,
     odds1: float | None = None, odds2: float | None = None,
     min_edge: float = DEFAULT_MIN_EDGE,
+    best_of: int = 3,
 ) -> dict:
     """
     Valutazione completa di valore per il match.
@@ -139,8 +158,9 @@ def evaluate_value(
     Ritorna un dict con la probabilità del modello per entrambi, e — se le
     quote sono fornite — EV per lato, probabilità implicite (senza margine),
     e il pick di valore consigliato (o None se nessun lato supera min_edge).
+    `best_of` (3 o 5) va passato per gli Slam maschili: vedi win_probability.
     """
-    p1_prob, p2_prob = win_probability(p1_stats, p2_stats)
+    p1_prob, p2_prob = win_probability(p1_stats, p2_stats, best_of=best_of)
     result = {
         "p1_name": p1_name, "p2_name": p2_name,
         "p1_prob": p1_prob, "p2_prob": p2_prob,
