@@ -1,13 +1,14 @@
 """
 build_dataset.py — genera dati giocatori REALI per TennisIQ.
 
-Scarica i match ATP di Jeff Sackmann (dataset pubblico, gratuito, storico
-completo) e li aggrega in `players_data.json`, che data_provider.py carica
-al posto dei mock hardcoded.
+Scarica i match ATP (dataset pubblico, storico completo) e li aggrega in
+`players_data.json`, che data_provider.py carica al posto dei mock hardcoded.
 
-Fonte: https://github.com/JeffSackmann/tennis_atp
-  atp_matches_YYYY.csv — un match per riga, con superficie, esito, durata e
-  statistiche break-point reali (bpSaved / bpFaced).
+Fonte primaria: https://github.com/Tennismylife/TML-Database  (file "YYYY.csv")
+Fallback:       https://github.com/JeffSackmann/tennis_atp     (file "atp_matches_YYYY.csv", repo attualmente rimosso)
+Schema identico: un match per riga, con superficie, esito, durata e statistiche
+break-point reali (bpSaved / bpFaced). Licenza dati CC BY-NC-SA 4.0 (uso NON
+commerciale, attribuzione richiesta).
 
 Uso:
     python build_dataset.py                 # ultimi 4 anni, top 60 per n. match
@@ -28,7 +29,7 @@ import json
 import os
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Fonti dati (schema colonne identico Sackmann). La prima che risponde vince.
 # TML-Database è un mirror ATP vivo e aggiornato (file annuali "YYYY.csv");
@@ -230,7 +231,7 @@ def _load_csv_text(text: str, players: dict) -> int:
 
 def build(years: int, top: int, from_dir: str | None) -> dict:
     players: dict = {}
-    current_year = datetime.utcnow().year
+    current_year = datetime.now(timezone.utc).year
     year_list = list(range(current_year - years + 1, current_year + 1))
 
     if from_dir:
@@ -248,7 +249,7 @@ def build(years: int, top: int, from_dir: str | None) -> dict:
             if text is None:
                 continue
             n = _load_csv_text(text, players)
-            print(f"[ok] atp_matches_{y}.csv: {n} match")
+            print(f"[ok] {y}: {n} match")
 
     if not players:
         print("Nessun dato caricato. Con --from-dir controlla i CSV; "

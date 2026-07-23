@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import analytics
 from build_dataset import (
@@ -80,7 +80,7 @@ def _orientation(date_key: str, w: str, l: str) -> int:
 def _read_rows(from_dir: str | None, years: int):
     import csv
     import io
-    current = datetime.utcnow().year
+    current = datetime.now(timezone.utc).year
     year_list = list(range(current - years + 1, current + 1))
     rows = []
     if from_dir:
@@ -100,7 +100,7 @@ def _read_rows(from_dir: str | None, years: int):
                 continue
             for r in csv.DictReader(io.StringIO(text)):
                 rows.append(r)
-            print(f"[ok] atp_matches_{y}.csv")
+            print(f"[ok] {y}")
     return rows
 
 
@@ -181,13 +181,14 @@ def _metrics(model, X, y) -> dict:
 def fit(X, y, dates) -> dict:
     from sklearn.linear_model import LogisticRegression
 
-    # Validazione temporale: ultimo anno come holdout.
-    if dates:
-        cutoff = datetime(max(d.year for d in dates), 1, 1)
-        train_idx = [i for i, d in enumerate(dates) if d < cutoff]
-        val_idx = [i for i, d in enumerate(dates) if d >= cutoff]
-    else:
-        train_idx, val_idx = list(range(len(X))), []
+    # Validazione temporale: ultimo 20% dei campioni (già in ordine cronologico)
+    # come holdout. Split per indice → niente informazione futura nel train, e
+    # un val abbastanza grande da essere affidabile (a differenza del solo
+    # ultimo anno solare, che su un anno appena iniziato è minuscolo).
+    n = len(X)
+    split = int(n * 0.8)
+    train_idx = list(range(split))
+    val_idx = list(range(split, n))
 
     # baseline: sempre 0.5 → log_loss = ln 2 ≈ 0.6931; il modello deve batterlo.
     def subset(idx):
@@ -213,7 +214,7 @@ def fit(X, y, dates) -> dict:
         "w_momentum": round(float(coef[1]), 6),
         "w_clutch": round(float(coef[2]), 6),
         "n_samples": len(X),
-        "trained_at": datetime.utcnow().isoformat() + "Z",
+        "trained_at": datetime.now(timezone.utc).isoformat(),
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
         "note": "Walk-forward, no leakage. Baseline log_loss (p=0.5)=0.6931.",
