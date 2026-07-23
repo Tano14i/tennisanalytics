@@ -145,6 +145,20 @@ st.markdown("---")
 # ── Step 3 — Generate report ──────────────────────────────────────────────────
 st.subheader("📊 Step 3 — Generate Report")
 
+st.markdown("**Quote (opzionale)** — inseriscile per calcolare EV e value pick:")
+oc1, oc2 = st.columns(2)
+odds1 = oc1.number_input(
+    f"Quota {fixture['p1_name']}", min_value=1.0, max_value=100.0,
+    value=1.0, step=0.05, format="%.2f",
+)
+odds2 = oc2.number_input(
+    f"Quota {fixture['p2_name']}", min_value=1.0, max_value=100.0,
+    value=1.0, step=0.05, format="%.2f",
+)
+# 1.0 = campo lasciato vuoto → nessuna quota
+odds1_val = odds1 if odds1 > 1.0 else None
+odds2_val = odds2 if odds2 > 1.0 else None
+
 gen_btn = st.button("🚀 GENERA REPORT PER TELEGRAM", use_container_width=True)
 
 if gen_btn:
@@ -175,6 +189,7 @@ if gen_btn:
                 p1_key, p1_data["full_name"], p1_stats,
                 p2_key, p2_data["full_name"], p2_stats,
                 fixture["tournament"], fixture["surface"],
+                odds1=odds1_val, odds2=odds2_val,
             )
 
         except Exception as exc:

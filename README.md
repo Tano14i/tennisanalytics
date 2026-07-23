@@ -37,6 +37,8 @@ CLI:
 
 ```bash
 python main.py "Sinner" "Alcaraz" "Roland Garros"
+# con quote → calcola EV e value pick:
+python main.py "Sinner" "Alcaraz" "Roland Garros" --odds1 1.85 --odds2 1.95
 ```
 
 App web:
@@ -44,6 +46,18 @@ App web:
 ```bash
 streamlit run app.py
 ```
+
+## Valore atteso (EV)
+
+Il tool stima una probabilità di vittoria da record per superficie, forma e
+clutch, poi — se fornisci le quote (argomenti CLI o campi nell'app) — la
+confronta con la probabilità implicita del bookmaker (margine rimosso) e
+calcola l'**EV**: un lato è "value pick" solo se `prob × quota − 1` supera il
+margine minimo. Senza quote non c'è scommessa valutabile, solo analisi.
+
+Onestà: il modello di probabilità (`betting.py`) è una combinazione logistica
+trasparente con pesi-prior **non addestrati** su dati storici — una stima
+ragionata, non una verità. I pesi sono costanti tarabili nel modulo.
 
 ## Calendario live (opzionale)
 

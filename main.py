@@ -13,6 +13,7 @@ import argparse
 
 import data_provider as dp
 import analytics
+import betting
 
 
 def _momentum_label(score: float) -> str:
@@ -136,9 +137,11 @@ def build_insight(p1_name: str, p1_stats: dict,
 
 def format_post(p1_name: str, p1_full: str, p1_stats: dict,
                 p2_name: str, p2_full: str, p2_stats: dict,
-                tournament: str, surface: str) -> str:
+                tournament: str, surface: str,
+                odds1: float | None = None, odds2: float | None = None) -> str:
 
     insight = build_insight(p1_name, p1_stats, p2_name, p2_stats, surface)
+    ev = betting.evaluate_value(p1_full, p1_stats, p2_full, p2_stats, odds1, odds2)
     div = "━" * 40
 
     # Momentum labels and signed scores
@@ -171,6 +174,9 @@ def format_post(p1_name: str, p1_full: str, p1_stats: dict,
         f"    {p1_full:<22} {p1_stats['clutch_factor']:>5}%",
         f"    {p2_full:<22} {p2_stats['clutch_factor']:>5}%",
         "",
+        f"💰  VALUE & EXPECTED VALUE",
+        betting.format_value_block(ev),
+        "",
         div,
         f"💡  TIPSTER INSIGHT",
         f"    {insight}",
@@ -188,6 +194,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("player1_name", help="First player (e.g. Sinner)")
     parser.add_argument("player2_name", help="Second player (e.g. Alcaraz)")
     parser.add_argument("tournament_name", help='Tournament (e.g. "Roland Garros")')
+    parser.add_argument("--odds1", type=float, default=None,
+                        help="Decimal odds for player1 (enables EV / value pick)")
+    parser.add_argument("--odds2", type=float, default=None,
+                        help="Decimal odds for player2 (enables EV / value pick)")
     return parser.parse_args()
 
 
@@ -220,6 +230,7 @@ def main() -> None:
         args.player1_name, p1_data["full_name"], p1_stats,
         args.player2_name, p2_data["full_name"], p2_stats,
         args.tournament_name, surface,
+        odds1=args.odds1, odds2=args.odds2,
     )
     print(post)
 
