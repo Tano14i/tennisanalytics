@@ -13,16 +13,47 @@ verità. I pesi sono costanti a livello di modulo, quindi tarabili.
 """
 from __future__ import annotations
 
+import json
 import math
+import os
 
 # Pesi-prior (non fittati) applicati ai differenziali player1 - player2.
+# Usati SOLO come fallback se betting_weights.json non è presente.
 # Scala pensata così: da soli, un vantaggio di ~20 punti su una metrica
 # sposta la probabilità verso ~0.60-0.65, mai a certezza.
-_W_SURFACE = 0.030   # win rate per superficie (%) — segnale più stabile
-_W_MOMENTUM = 0.015  # forma su 3 match: informativo ma rumoroso → peso basso
-_W_CLUTCH = 0.022    # clutch (%) — pesa nei match equilibrati
+_PRIOR_W_SURFACE = 0.030
+_PRIOR_W_MOMENTUM = 0.015
+_PRIOR_W_CLUTCH = 0.022
 
-# La probabilità del modello è troncata per non dare mai certezza da un'euristica.
+# Pesi attivi: prior finché fit_weights.py non genera betting_weights.json.
+_W_SURFACE = _PRIOR_W_SURFACE
+_W_MOMENTUM = _PRIOR_W_MOMENTUM
+_W_CLUTCH = _PRIOR_W_CLUTCH
+WEIGHTS_SOURCE = "prior"  # "fitted" quando caricati da betting_weights.json
+
+_WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "betting_weights.json")
+
+
+def _load_fitted_weights() -> None:
+    """Carica i pesi fittati da betting_weights.json (walk-forward, senza
+    leakage) se il file esiste. Altrimenti restano i prior."""
+    global _W_SURFACE, _W_MOMENTUM, _W_CLUTCH, WEIGHTS_SOURCE
+    if not os.path.exists(_WEIGHTS_PATH):
+        return
+    try:
+        with open(_WEIGHTS_PATH, encoding="utf-8") as fh:
+            w = json.load(fh)
+        _W_SURFACE = float(w["w_surface"])
+        _W_MOMENTUM = float(w["w_momentum"])
+        _W_CLUTCH = float(w["w_clutch"])
+        WEIGHTS_SOURCE = "fitted"
+    except Exception:
+        pass  # file corrotto → resta sui prior
+
+
+_load_fitted_weights()
+
+# La probabilità del modello è troncata per non dare mai certezza estrema.
 _PROB_FLOOR = 0.05
 _PROB_CEIL = 0.95
 
@@ -113,7 +144,8 @@ def format_value_block(ev: dict) -> str:
     """Riga(he) testuali sul valore, da appendere al post generato."""
     lines = []
     p1, p2 = ev["p1_name"], ev["p2_name"]
-    lines.append(f"    Model win prob : {p1} {ev['p1_prob']*100:.0f}%  •  {p2} {ev['p2_prob']*100:.0f}%")
+    tag = "fitted" if WEIGHTS_SOURCE == "fitted" else "heuristic prior"
+    lines.append(f"    Model win prob : {p1} {ev['p1_prob']*100:.0f}%  •  {p2} {ev['p2_prob']*100:.0f}%  ({tag})")
     if not ev["has_odds"]:
         lines.append("    Odds           : — (inserisci le quote per valutare l'EV)")
         return "\n".join(lines)

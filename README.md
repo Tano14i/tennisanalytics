@@ -55,9 +55,22 @@ confronta con la probabilità implicita del bookmaker (margine rimosso) e
 calcola l'**EV**: un lato è "value pick" solo se `prob × quota − 1` supera il
 margine minimo. Senza quote non c'è scommessa valutabile, solo analisi.
 
-Onestà: il modello di probabilità (`betting.py`) è una combinazione logistica
-trasparente con pesi-prior **non addestrati** su dati storici — una stima
-ragionata, non una verità. I pesi sono costanti tarabili nel modulo.
+Il modello di probabilità (`betting.py`) è una combinazione logistica dei
+differenziali di metrica. Di default usa pesi-prior euristici; per **calibrarlo
+sui dati reali** genera i pesi fittati:
+
+```bash
+python fit_weights.py --years 8
+git add betting_weights.json && git commit -m "fit betting weights"
+```
+
+`fit_weights.py` costruisce un training set **walk-forward senza data leakage**
+(per ogni match le feature vengono dallo stato precedente al match), fitta una
+logistica senza intercetta (così la simmetria "scambio giocatori → 1−prob"
+resta garantita) e valida su split temporale (ultimo anno come holdout,
+riportando log-loss/accuracy/Brier vs la baseline p=0.5 → log-loss 0.693).
+`betting.py` carica `betting_weights.json` in automatico; senza il file resta
+sui prior. Il report indica quale dei due è attivo (`fitted` / `heuristic prior`).
 
 ## Calendario live (opzionale)
 
