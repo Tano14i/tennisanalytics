@@ -26,7 +26,7 @@ import sys
 from datetime import datetime
 
 import analytics
-from build_dataset import RAW_BASE, _canon_surface, _count_tiebreaks, _parse_date, _to_int
+from build_dataset import _canon_surface, _count_tiebreaks, _parse_date, _to_int, fetch_year_csv
 
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "betting_weights.json")
 
@@ -87,16 +87,11 @@ def _read_rows(from_dir: str | None, years: int):
                     rows.append(r)
             print(f"[ok] {os.path.basename(path)}")
     else:
-        import requests
         for y in year_list:
-            url = f"{RAW_BASE}/atp_matches_{y}.csv"
-            try:
-                resp = requests.get(url, timeout=30)
-                resp.raise_for_status()
-            except Exception as exc:
-                print(f"[skip] {url}: {exc}")
+            text = fetch_year_csv(y)
+            if text is None:
                 continue
-            for r in csv.DictReader(io.StringIO(resp.text)):
+            for r in csv.DictReader(io.StringIO(text)):
                 rows.append(r)
             print(f"[ok] atp_matches_{y}.csv")
     return rows

@@ -30,8 +30,31 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 
-RAW_BASE = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master"
+# Branch del repo Sackmann provati in ordine (master storicamente, main come
+# fallback in caso di rinomina). RAW_BASE resta per compatibilita'.
+_RAW_REPO = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp"
+_BRANCHES = ("master", "main")
+RAW_BASE = f"{_RAW_REPO}/master"
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "players_data.json")
+
+
+def fetch_year_csv(year: int, session=None):
+    """Scarica atp_matches_<year>.csv provando i branch noti.
+    Ritorna il testo CSV, oppure None se non trovato su nessun branch."""
+    import requests
+    get = (session or requests).get
+    last = None
+    for branch in _BRANCHES:
+        url = f"{_RAW_REPO}/{branch}/atp_matches_{year}.csv"
+        try:
+            resp = get(url, timeout=30)
+            if resp.status_code == 200:
+                return resp.text
+            last = f"HTTP {resp.status_code}"
+        except Exception as exc:
+            last = repr(exc)
+    print(f"[skip] atp_matches_{year}.csv non trovato ({last})")
+    return None
 
 # Superfici come le usa l'app (analytics/data_provider).
 _SURFACE_CANON = {"Hard": "Hard", "Clay": "Clay", "Grass": "Grass", "Carpet": "Hard"}
@@ -204,16 +227,11 @@ def build(years: int, top: int, from_dir: str | None) -> dict:
                 n = _load_csv_text(fh.read(), players)
             print(f"[ok] {os.path.basename(path)}: {n} match")
     else:
-        import requests  # import ritardato: serve solo in modalita' download
         for y in year_list:
-            url = f"{RAW_BASE}/atp_matches_{y}.csv"
-            try:
-                resp = requests.get(url, timeout=30)
-                resp.raise_for_status()
-            except Exception as exc:
-                print(f"[skip] {url}: {exc}")
+            text = fetch_year_csv(y)
+            if text is None:
                 continue
-            n = _load_csv_text(resp.text, players)
+            n = _load_csv_text(text, players)
             print(f"[ok] atp_matches_{y}.csv: {n} match")
 
     if not players:
