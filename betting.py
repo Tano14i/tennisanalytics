@@ -25,12 +25,25 @@ _PRIOR_W_SURFACE = 0.030
 _PRIOR_W_MOMENTUM = 0.015
 _PRIOR_W_CLUTCH = 0.022
 _PRIOR_W_RANK = 0.300   # feature log-rank (~-4..+4): il predittore piu' forte
+_PRIOR_W_RANK_POINTS = 0.100  # log-diff punti ranking: parzialmente ridondante
+                               # col rank ordinale, ma cattura il "quanto" oltre
+                               # al "chi è davanti" (rank 50 con 1500 pt vs 600 pt)
+_PRIOR_W_SERVE = 0.035   # serve_win_rate diff (~-15..+15 punti): forte, per-punto
+_PRIOR_W_RETURN = 0.035  # return_win_rate diff: idem, complementare al servizio
+_PRIOR_W_H2H = 0.010     # scontri diretti diff (-100..+100): quasi sempre 0
+                         # (pochi precedenti tra due giocatori), ma quando c'è
+                         # storia può segnalare un matchup sfavorevole che le
+                         # metriche aggregate non vedono (stile di gioco, ecc.)
 
 # Pesi attivi: prior finché fit_weights.py non genera betting_weights.json.
 _W_SURFACE = _PRIOR_W_SURFACE
 _W_MOMENTUM = _PRIOR_W_MOMENTUM
 _W_CLUTCH = _PRIOR_W_CLUTCH
 _W_RANK = _PRIOR_W_RANK
+_W_RANK_POINTS = _PRIOR_W_RANK_POINTS
+_W_SERVE = _PRIOR_W_SERVE
+_W_RETURN = _PRIOR_W_RETURN
+_W_H2H = _PRIOR_W_H2H
 WEIGHTS_SOURCE = "prior"  # "fitted" quando caricati da betting_weights.json
 
 _WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "betting_weights.json")
@@ -40,6 +53,7 @@ def _load_fitted_weights() -> None:
     """Carica i pesi fittati da betting_weights.json (walk-forward, senza
     leakage) se il file esiste. Altrimenti restano i prior."""
     global _W_SURFACE, _W_MOMENTUM, _W_CLUTCH, _W_RANK, WEIGHTS_SOURCE
+    global _W_RANK_POINTS, _W_SERVE, _W_RETURN, _W_H2H
     if not os.path.exists(_WEIGHTS_PATH):
         return
     try:
@@ -48,8 +62,13 @@ def _load_fitted_weights() -> None:
         _W_SURFACE = float(w["w_surface"])
         _W_MOMENTUM = float(w["w_momentum"])
         _W_CLUTCH = float(w["w_clutch"])
-        # w_rank opzionale: pesi fittati vecchi (senza ranking) restano validi.
+        # feature opzionali: pesi fittati generati prima della loro
+        # introduzione restano validi, semplicemente contribuiscono 0.
         _W_RANK = float(w.get("w_rank", 0.0))
+        _W_RANK_POINTS = float(w.get("w_rank_points", 0.0))
+        _W_SERVE = float(w.get("w_serve", 0.0))
+        _W_RETURN = float(w.get("w_return", 0.0))
+        _W_H2H = float(w.get("w_h2h", 0.0))
         WEIGHTS_SOURCE = "fitted"
     except Exception:
         pass  # file corrotto → resta sui prior
@@ -71,6 +90,37 @@ def rank_feature(rank1, rank2) -> float:
     if r1 <= 0 or r2 <= 0:
         return 0.0
     return math.log(r2) - math.log(r1)
+
+
+def rank_points_feature(points1, points2) -> float:
+    """Feature = log(points1) - log(points2): positiva quando player1 ha più
+    punti ranking (a differenza del rank ordinale, dove meno è meglio — qui
+    è il contrario: più punti = più forte). Cattura il "quanto" di vantaggio
+    che l'ordinale da solo perde (rank 50 con 1500pt è molto diverso da rank
+    50 con 600pt). Ritorna 0 se un valore manca o è 0 → nessun falso segnale."""
+    try:
+        p1 = int(points1 or 0)
+        p2 = int(points2 or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if p1 <= 0 or p2 <= 0:
+        return 0.0
+    return math.log(p1) - math.log(p2)
+
+
+def h2h_win_rate(wins, losses) -> float:
+    """% di vittorie negli scontri diretti noti: (wins-losses)/(wins+losses)*100,
+    in [-100, 100]. 0.0 se non ci sono precedenti (la maggioranza delle
+    coppie di giocatori) → nessun falso segnale."""
+    try:
+        w = int(wins or 0)
+        l = int(losses or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    total = w + l
+    if total <= 0:
+        return 0.0
+    return round((w - l) / total * 100, 1)
 
 # La probabilità del modello è troncata per non dare mai certezza estrema.
 _PROB_FLOOR = 0.05
@@ -105,12 +155,26 @@ def win_probability(p1_stats: dict, p2_stats: dict, best_of: int = 3) -> tuple[f
     mom_diff = p1_stats.get("momentum_score", 0.0) - p2_stats.get("momentum_score", 0.0)
     clutch_diff = p1_stats.get("clutch_factor", 0.0) - p2_stats.get("clutch_factor", 0.0)
     rank_diff = rank_feature(p1_stats.get("ranking", 0), p2_stats.get("ranking", 0))
+    rank_pts_diff = rank_points_feature(p1_stats.get("rank_points", 0), p2_stats.get("rank_points", 0))
+    serve_diff = p1_stats.get("serve_win_rate", 0.0) - p2_stats.get("serve_win_rate", 0.0)
+    return_diff = p1_stats.get("return_win_rate", 0.0) - p2_stats.get("return_win_rate", 0.0)
+    # h2h_wins/h2h_losses = record di QUESTO giocatore contro l'avversario
+    # specifico di questo match — vanno iniettati dal chiamante (non sono
+    # una proprietà del giocatore da solo, dipendono dalla coppia).
+    h2h_diff = (
+        h2h_win_rate(p1_stats.get("h2h_wins", 0), p1_stats.get("h2h_losses", 0))
+        - h2h_win_rate(p2_stats.get("h2h_wins", 0), p2_stats.get("h2h_losses", 0))
+    )
 
     logit = (
         _W_SURFACE * surf_diff
         + _W_MOMENTUM * mom_diff
         + _W_CLUTCH * clutch_diff
         + _W_RANK * rank_diff
+        + _W_RANK_POINTS * rank_pts_diff
+        + _W_SERVE * serve_diff
+        + _W_RETURN * return_diff
+        + _W_H2H * h2h_diff
     )
     p1_raw = _sigmoid(logit)
 

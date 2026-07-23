@@ -26,7 +26,7 @@ import sys
 from datetime import datetime, timezone
 
 import analytics
-from betting import rank_feature
+from betting import h2h_win_rate, rank_feature, rank_points_feature
 from build_dataset import (
     _canon_surface,
     _count_tiebreaks,
@@ -59,6 +59,9 @@ def _new_state(name: str) -> dict:
         "break_points_saved": {"faced": 0, "saved": 0},
         "tiebreaks": {"played": 0, "won": 0},
         "games_sum": 0, "games_matches": 0,
+        "serve_points": {"won": 0, "total": 0},
+        "return_points": {"won": 0, "total": 0},
+        "h2h": {},  # nome avversario -> {"wins": int, "losses": int}
     }
 
 
@@ -66,10 +69,21 @@ def _games_avg(st: dict) -> float:
     return (st["games_sum"] / st["games_matches"]) if st["games_matches"] else 0.0
 
 
+def _h2h_record(st: dict, opponent_name: str) -> tuple[int, int]:
+    """Record di st contro un avversario specifico: (wins, losses).
+    (0, 0) se non si sono mai incontrati (la stragrande maggioranza delle
+    coppie di giocatori)."""
+    rec = st["h2h"].get(opponent_name)
+    return (rec["wins"], rec["losses"]) if rec else (0, 0)
+
+
 def _update_state(st: dict, surface: str, minutes: int, result: str,
                   bp_faced: int, bp_saved: int, bp_opp: int, bp_conv: int,
                   tb_played: int, tb_won: int,
-                  total_games: int = 0, games_completed: bool = False) -> None:
+                  total_games: int = 0, games_completed: bool = False,
+                  serve_won: int = 0, serve_total: int = 0,
+                  return_won: int = 0, return_total: int = 0,
+                  opponent: str = "") -> None:
     st["match_count"] += 1
     rec = st["surface_records"].setdefault(surface, {"wins": 0, "losses": 0})
     rec["wins" if result == "W" else "losses"] += 1
@@ -84,6 +98,13 @@ def _update_state(st: dict, surface: str, minutes: int, result: str,
     if games_completed:
         st["games_sum"] += total_games
         st["games_matches"] += 1
+    st["serve_points"]["won"] += serve_won
+    st["serve_points"]["total"] += serve_total
+    st["return_points"]["won"] += return_won
+    st["return_points"]["total"] += return_total
+    if opponent:
+        h2h_rec = st["h2h"].setdefault(opponent, {"wins": 0, "losses": 0})
+        h2h_rec["wins" if result == "W" else "losses"] += 1
 
 
 def _orientation(date_key: str, w: str, l: str) -> int:
@@ -160,6 +181,9 @@ def build_samples(rows: list[dict]):
         # ranking al momento del match (colonne winner_rank/loser_rank): è
         # informazione pre-partita, quindi nessun leakage.
         w_rank, l_rank = _to_int(r.get("winner_rank")), _to_int(r.get("loser_rank"))
+        w_rank_pts, l_rank_pts = _to_int(r.get("winner_rank_points")), _to_int(r.get("loser_rank_points"))
+        w_svpt, w_1st_won, w_2nd_won = _to_int(r.get("w_svpt")), _to_int(r.get("w_1stWon")), _to_int(r.get("w_2ndWon"))
+        l_svpt, l_1st_won, l_2nd_won = _to_int(r.get("l_svpt")), _to_int(r.get("l_1stWon")), _to_int(r.get("l_2ndWon"))
         total_games, _total_sets, games_completed = parse_score(score)
         # best_of: solo 3 o 5 sono formati validi in ATP; qualunque altro
         # valore (dato mancante/sporco) esclude il match dal training games,
@@ -173,15 +197,23 @@ def build_samples(rows: list[dict]):
         if ws and ls and ws["match_count"] >= MIN_HISTORY and ls["match_count"] >= MIN_HISTORY:
             w_stats = analytics.compute_all(ws, surface)
             l_stats = analytics.compute_all(ls, surface)
+            # h2h: record di QUESTO giocatore contro l'avversario specifico
+            # di questo match (walk-forward: solo precedenti PRIMA di oggi).
+            w_stats["h2h_wins"], w_stats["h2h_losses"] = _h2h_record(ws, l)
+            l_stats["h2h_wins"], l_stats["h2h_losses"] = _h2h_record(ls, w)
             if _orientation(r.get("tourney_date", ""), w, l) == 0:
-                p1, p2, r1, r2, target = w_stats, l_stats, w_rank, l_rank, 1
+                p1, p2, r1, r2, rp1, rp2, target = w_stats, l_stats, w_rank, l_rank, w_rank_pts, l_rank_pts, 1
             else:
-                p1, p2, r1, r2, target = l_stats, w_stats, l_rank, w_rank, 0
+                p1, p2, r1, r2, rp1, rp2, target = l_stats, w_stats, l_rank, w_rank, l_rank_pts, w_rank_pts, 0
             X.append([
                 p1["surface_win_rate"] - p2["surface_win_rate"],
                 p1["momentum_score"] - p2["momentum_score"],
                 p1["clutch_factor"] - p2["clutch_factor"],
                 rank_feature(r1, r2),
+                rank_points_feature(rp1, rp2),
+                p1["serve_win_rate"] - p2["serve_win_rate"],
+                p1["return_win_rate"] - p2["return_win_rate"],
+                h2h_win_rate(p1["h2h_wins"], p1["h2h_losses"]) - h2h_win_rate(p2["h2h_wins"], p2["h2h_losses"]),
             ])
             y.append(target)
             dates.append(date or datetime.min)
@@ -206,12 +238,18 @@ def build_samples(rows: list[dict]):
                       bp_faced=w_bp_faced, bp_saved=w_bp_saved,
                       bp_opp=l_bp_faced, bp_conv=max(0, l_bp_faced - l_bp_saved),
                       tb_played=w_tb_played, tb_won=w_tb_won,
-                      total_games=total_games, games_completed=games_completed)
+                      total_games=total_games, games_completed=games_completed,
+                      serve_won=w_1st_won + w_2nd_won, serve_total=w_svpt,
+                      return_won=max(0, l_svpt - l_1st_won - l_2nd_won), return_total=l_svpt,
+                      opponent=l)
         _update_state(state[l], surface, minutes, "L",
                       bp_faced=l_bp_faced, bp_saved=l_bp_saved,
                       bp_opp=w_bp_faced, bp_conv=max(0, w_bp_faced - w_bp_saved),
                       tb_played=l_tb_played, tb_won=l_tb_won,
-                      total_games=total_games, games_completed=games_completed)
+                      total_games=total_games, games_completed=games_completed,
+                      serve_won=l_1st_won + l_2nd_won, serve_total=l_svpt,
+                      return_won=max(0, w_svpt - w_1st_won - w_2nd_won), return_total=w_svpt,
+                      opponent=w)
 
     return X, y, dates, Xg, yg, dates_g
 
@@ -266,6 +304,10 @@ def fit(X, y, dates) -> dict:
         "w_momentum": round(float(coef[1]), 6),
         "w_clutch": round(float(coef[2]), 6),
         "w_rank": round(float(coef[3]), 6),
+        "w_rank_points": round(float(coef[4]), 6),
+        "w_serve": round(float(coef[5]), 6),
+        "w_return": round(float(coef[6]), 6),
+        "w_h2h": round(float(coef[7]), 6),
         "n_samples": len(X),
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "train_metrics": train_metrics,
@@ -371,10 +413,14 @@ def main() -> int:
         json.dump(result, fh, ensure_ascii=False, indent=2)
 
     print("\n── Pesi fittati (moneyline) ──")
-    print(f"  w_surface  = {result['w_surface']}")
-    print(f"  w_momentum = {result['w_momentum']}")
-    print(f"  w_clutch   = {result['w_clutch']}")
-    print(f"  w_rank     = {result['w_rank']}")
+    print(f"  w_surface     = {result['w_surface']}")
+    print(f"  w_momentum    = {result['w_momentum']}")
+    print(f"  w_clutch      = {result['w_clutch']}")
+    print(f"  w_rank        = {result['w_rank']}")
+    print(f"  w_rank_points = {result['w_rank_points']}")
+    print(f"  w_serve       = {result['w_serve']}")
+    print(f"  w_return      = {result['w_return']}")
+    print(f"  w_h2h         = {result['w_h2h']}")
     print(f"  train: {result['train_metrics']}")
     print(f"  val  : {result['val_metrics']}")
     print(f"Scritto {args.out}.")

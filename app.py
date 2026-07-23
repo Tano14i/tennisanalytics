@@ -191,8 +191,14 @@ if gen_btn:
             p2_stats = an.compute_all(p2_data, fixture["surface"])
             p1_stats["ranking"] = p1_data.get("ranking", 0)
             p2_stats["ranking"] = p2_data.get("ranking", 0)
+            p1_stats["rank_points"] = p1_data.get("rank_points", 0)
+            p2_stats["rank_points"] = p2_data.get("rank_points", 0)
             p1_stats["games_avg"] = p1_data.get("games_avg", 0.0)
             p2_stats["games_avg"] = p2_data.get("games_avg", 0.0)
+            p1_h2h = (p1_data.get("h2h") or {}).get(p2_data["full_name"], {"wins": 0, "losses": 0})
+            p2_h2h = (p2_data.get("h2h") or {}).get(p1_data["full_name"], {"wins": 0, "losses": 0})
+            p1_stats["h2h_wins"], p1_stats["h2h_losses"] = p1_h2h["wins"], p1_h2h["losses"]
+            p2_stats["h2h_wins"], p2_stats["h2h_losses"] = p2_h2h["wins"], p2_h2h["losses"]
 
             # Extract short keys (e.g. "Sinner") for the insight engine.
             # Fall back to the full name if no short key is found in PLAYERS.

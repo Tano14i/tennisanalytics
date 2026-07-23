@@ -48,7 +48,7 @@ from datetime import datetime
 import analytics
 import betting
 from build_dataset import _canon_surface, _count_tiebreaks, _parse_date, _to_int, parse_score
-from fit_weights import MIN_HISTORY, _games_avg, _new_state, _update_state, _read_rows
+from fit_weights import MIN_HISTORY, _games_avg, _h2h_record, _new_state, _update_state, _read_rows
 
 # Finestra di tolleranza tra la data di inizio torneo (TML, un valore per
 # tutto l'evento) e la data del singolo match (tennis-data.co.uk, per round):
@@ -235,6 +235,9 @@ def run_backtest(tml_rows: list[dict], odds_index: dict, min_edge: float) -> dic
         w_tb_played, w_tb_won = _count_tiebreaks(score, True)
         l_tb_played, l_tb_won = _count_tiebreaks(score, False)
         w_rank, l_rank = _to_int(r.get("winner_rank")), _to_int(r.get("loser_rank"))
+        w_rank_pts, l_rank_pts = _to_int(r.get("winner_rank_points")), _to_int(r.get("loser_rank_points"))
+        w_svpt, w_1st_won, w_2nd_won = _to_int(r.get("w_svpt")), _to_int(r.get("w_1stWon")), _to_int(r.get("w_2ndWon"))
+        l_svpt, l_1st_won, l_2nd_won = _to_int(r.get("l_svpt")), _to_int(r.get("l_1stWon")), _to_int(r.get("l_2ndWon"))
         best_of = _to_int(r.get("best_of"), 0)
         total_games, _ts, games_completed = parse_score(score)
 
@@ -250,6 +253,10 @@ def run_backtest(tml_rows: list[dict], odds_index: dict, min_edge: float) -> dic
                 l_stats = analytics.compute_all(ls, surface)
                 w_stats["ranking"] = w_rank
                 l_stats["ranking"] = l_rank
+                w_stats["rank_points"] = w_rank_pts
+                l_stats["rank_points"] = l_rank_pts
+                w_stats["h2h_wins"], w_stats["h2h_losses"] = _h2h_record(ws, l)
+                l_stats["h2h_wins"], l_stats["h2h_losses"] = _h2h_record(ls, w)
                 w_stats["games_avg"] = _games_avg(ws)
                 l_stats["games_avg"] = _games_avg(ls)
 
@@ -279,11 +286,17 @@ def run_backtest(tml_rows: list[dict], odds_index: dict, min_edge: float) -> dic
                       bp_faced=w_bp_faced, bp_saved=w_bp_saved,
                       bp_opp=l_bp_faced, bp_conv=max(0, l_bp_faced - l_bp_saved),
                       tb_played=w_tb_played, tb_won=w_tb_won,
-                      total_games=total_games, games_completed=games_completed)
+                      serve_won=w_1st_won + w_2nd_won, serve_total=w_svpt,
+                      return_won=max(0, l_svpt - l_1st_won - l_2nd_won), return_total=l_svpt,
+                      total_games=total_games, games_completed=games_completed,
+                      opponent=l)
         _update_state(state[l], surface, minutes, "L",
                       bp_faced=l_bp_faced, bp_saved=l_bp_saved,
                       bp_opp=w_bp_faced, bp_conv=max(0, w_bp_faced - w_bp_saved),
                       tb_played=l_tb_played, tb_won=l_tb_won,
+                      serve_won=l_1st_won + l_2nd_won, serve_total=l_svpt,
+                      return_won=max(0, w_svpt - w_1st_won - w_2nd_won), return_total=w_svpt,
+                      opponent=w,
                       total_games=total_games, games_completed=games_completed)
 
     return _summarize(bets)

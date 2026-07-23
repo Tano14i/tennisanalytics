@@ -263,7 +263,16 @@ def _ensure_player_shape(record: dict) -> dict:
             record[key] = factory()
     record.setdefault("full_name", "Unknown")
     record.setdefault("ranking", 0)
+    record.setdefault("rank_points", 0)  # 0 = "ignoto" → rank_points_feature ignora
     record.setdefault("games_avg", 0.0)  # 0.0 = "ignoto" → betting usa il prior grezzo
+    # 0/0 = "ignoto" → serve_return_rates ritorna 0.0 (nessun falso segnale):
+    # copre i mock e i players_data.json generati prima di questa feature.
+    if not isinstance(record.get("serve_points"), dict):
+        record["serve_points"] = {"won": 0, "total": 0}
+    if not isinstance(record.get("return_points"), dict):
+        record["return_points"] = {"won": 0, "total": 0}
+    if not isinstance(record.get("h2h"), dict):
+        record["h2h"] = {}
     return record
 
 

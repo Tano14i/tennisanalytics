@@ -154,7 +154,8 @@ def _blank_player(name: str) -> dict:
     return {
         "full_name": name,
         "ranking": 0,
-        "latest_date": None,  # data del match più recente visto (per il ranking)
+        "rank_points": 0,  # punti ranking (piu' continuo del solo ordinale)
+        "latest_date": None,  # data del match più recente visto (per ranking/rank_points)
         "match_count": 0,
         "games_sum": 0, "games_matches": 0,  # per media games/match (mercati O/U)
         "recent_raw": [],  # (date, surface, minutes, result) — ridotto dopo
@@ -163,6 +164,11 @@ def _blank_player(name: str) -> dict:
         "bp_opportunities": 0, "bp_converted": 0,
         "bp_faced": 0, "bp_saved": 0,
         "tb_played": 0, "tb_won": 0,
+        # punti servizio/risposta vinti su tutto lo storico caricato: si
+        # stabilizzano molto più in fretta delle metriche per-match.
+        "serve_won": 0, "serve_total": 0,
+        "return_won": 0, "return_total": 0,
+        "h2h": {},  # nome avversario -> {"wins": int, "losses": int}
     }
 
 
@@ -185,10 +191,20 @@ def _ingest_match(players: dict, row: dict) -> None:
 
     w_rank = _to_int(row.get("winner_rank"))
     l_rank = _to_int(row.get("loser_rank"))
+    w_rank_pts = _to_int(row.get("winner_rank_points"))
+    l_rank_pts = _to_int(row.get("loser_rank_points"))
+
+    # Punti servizio/risposta: svpt/1stWon/2ndWon sono nello schema Sackmann/TML
+    # standard. Mancano su alcuni match vecchi/incompleti -> 0, che si traduce
+    # in "nessun dato" (serve_total/return_total restano 0, feature = 0.0).
+    w_svpt, w_1st_won, w_2nd_won = _to_int(row.get("w_svpt")), _to_int(row.get("w_1stWon")), _to_int(row.get("w_2ndWon"))
+    l_svpt, l_1st_won, l_2nd_won = _to_int(row.get("l_svpt")), _to_int(row.get("l_1stWon")), _to_int(row.get("l_2ndWon"))
 
     total_games, _total_sets, completed = parse_score(score)
 
-    for name, is_winner, rank in ((w_name, True, w_rank), (l_name, False, l_rank)):
+    for name, is_winner, rank, rank_pts in (
+        (w_name, True, w_rank, w_rank_pts), (l_name, False, l_rank, l_rank_pts)
+    ):
         p = players.setdefault(name, _blank_player(name))
         p["match_count"] += 1
         if completed:
@@ -197,9 +213,13 @@ def _ingest_match(players: dict, row: dict) -> None:
         rec = p["surface_records"][surface]
         rec["wins" if is_winner else "losses"] += 1
         p["recent_raw"].append((date, surface, minutes, "W" if is_winner else "L"))
-        # ranking = quello del match più recente per cui il dato è presente
+        opponent_name = l_name if is_winner else w_name
+        h2h_rec = p["h2h"].setdefault(opponent_name, {"wins": 0, "losses": 0})
+        h2h_rec["wins" if is_winner else "losses"] += 1
+        # ranking/rank_points = quelli del match più recente per cui il dato è presente
         if rank > 0 and (p["latest_date"] is None or (date and date >= p["latest_date"])):
             p["ranking"] = rank
+            p["rank_points"] = rank_pts
             if date:
                 p["latest_date"] = date
 
@@ -213,6 +233,14 @@ def _ingest_match(players: dict, row: dict) -> None:
             p["bp_converted"] += max(0, l_bp_faced - l_bp_saved)
             p["tb_played"] += w_tb_played
             p["tb_won"] += w_tb_won
+            # servizio = punti vinti/giocati al proprio servizio (w_*);
+            # risposta = punti vinti/giocati sul servizio avversario (l_svpt
+            # meno quelli vinti dall'avversario = persi dall'avversario in
+            # risposta da parte del vincitore).
+            p["serve_won"] += w_1st_won + w_2nd_won
+            p["serve_total"] += w_svpt
+            p["return_won"] += max(0, l_svpt - l_1st_won - l_2nd_won)
+            p["return_total"] += l_svpt
         else:
             p["bp_faced"] += l_bp_faced
             p["bp_saved"] += l_bp_saved
@@ -220,6 +248,10 @@ def _ingest_match(players: dict, row: dict) -> None:
             p["bp_converted"] += max(0, w_bp_faced - w_bp_saved)
             p["tb_played"] += l_tb_played
             p["tb_won"] += l_tb_won
+            p["serve_won"] += l_1st_won + l_2nd_won
+            p["serve_total"] += l_svpt
+            p["return_won"] += max(0, w_svpt - w_1st_won - w_2nd_won)
+            p["return_total"] += w_svpt
 
 
 def _finalize(players: dict, top: int) -> dict:
@@ -243,6 +275,7 @@ def _finalize(players: dict, top: int) -> dict:
         out[short_key] = {
             "full_name": p["full_name"],
             "ranking": p["ranking"],
+            "rank_points": p["rank_points"],
             "recent_matches": recent_matches,
             "surface_records": {k: dict(v) for k, v in p["surface_records"].items()},
             "break_points": {
@@ -251,6 +284,12 @@ def _finalize(players: dict, top: int) -> dict:
             },
             "break_points_saved": {"faced": p["bp_faced"], "saved": p["bp_saved"]},
             "tiebreaks": {"played": p["tb_played"], "won": p["tb_won"]},
+            # punti servizio/risposta vinti (rapporto -> serve/return_win_rate
+            # in analytics.py): predittore forte, si stabilizza in fretta.
+            "serve_points": {"won": p["serve_won"], "total": p["serve_total"]},
+            "return_points": {"won": p["return_won"], "total": p["return_total"]},
+            # scontri diretti: nome avversario (full_name) -> {wins, losses}.
+            "h2h": {k: dict(v) for k, v in p["h2h"].items()},
             # media games totali (entrambi i giocatori) per match completato:
             # feature base per i mercati O/U games. 0.0 se nessun dato.
             "games_avg": games_avg,

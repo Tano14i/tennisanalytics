@@ -65,10 +65,14 @@ confronta con la probabilità implicita del bookmaker (margine rimosso) e
 calcola l'**EV**: un lato è "value pick" solo se `prob × quota − 1` supera il
 margine minimo. Senza quote non c'è scommessa valutabile, solo analisi.
 
-Il modello di probabilità (`betting.py`) è una combinazione logistica di quattro
-differenziali: **ranking** (log-rank, il predittore più forte nel tennis), record
-per superficie, forma e clutch. Di default usa pesi-prior euristici; per
-**calibrarlo sui dati reali** genera i pesi fittati:
+Il modello di probabilità (`betting.py`) è una combinazione logistica di otto
+differenziali: **ranking** (log-rank) e **rank_points** (log-diff punti
+ranking, più continuo dell'ordinale), record per superficie, forma, clutch,
+**servizio/risposta** (% punti vinti, cumulativi su tutto lo storico — si
+stabilizzano più in fretta delle metriche per-match) e **scontri diretti**
+(record specifico contro l'avversario di questo match, 0 se non si sono mai
+incontrati). Di default usa pesi-prior euristici; per **calibrarlo sui dati
+reali** genera i pesi fittati:
 
 ```bash
 python fit_weights.py --years 8
@@ -82,6 +86,16 @@ resta garantita) e valida su split temporale (ultimo anno come holdout,
 riportando log-loss/accuracy/Brier vs la baseline p=0.5 → log-loss 0.693).
 `betting.py` carica `betting_weights.json` in automatico; senza il file resta
 sui prior. Il report indica quale dei due è attivo (`fitted` / `heuristic prior`).
+
+**Onestà sui limiti**: su 19k match ATP reali (2019-2026), rank_points,
+servizio/risposta e scontri diretti — individualmente e insieme — non hanno
+misurabilmente migliorato accuracy/log-loss rispetto al modello a sole 4
+feature originali (~65% accuracy holdout, invariata; testato anche con
+regolarizzazione diversa e con un Gradient Boosting non lineare, nessuno dei
+due ha sfondato il tetto). Restano nel modello perché arricchiscono
+l'analisi testuale senza costo, non perché misurabilmente più predittivi: il
+ranking cattura già la stragrande maggioranza del segnale disponibile in
+queste statistiche aggregate.
 
 ## Mercati Games e Set
 

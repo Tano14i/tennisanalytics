@@ -94,6 +94,27 @@ def surface_win_rate(player: dict, surface: str) -> float:
     return round(record["wins"] / total * 100, 1)
 
 
+def serve_return_rates(player: dict) -> dict:
+    """
+    Serve and return points-won percentage, aggregate su tutto lo storico
+    caricato (non solo gli ultimi 3 match: sono percentuali per-punto, che
+    si stabilizzano molto più in fretta delle metriche per-match come il
+    momentum — restano informative anche con poche decine di partite).
+
+    serve_win_rate  = punti vinti al servizio / punti giocati al servizio
+    return_win_rate = punti vinti in risposta / punti giocati in risposta
+                       (= punti serviti dall'avversario e persi da lui)
+
+    0.0 per entrambe se il dato non è disponibile (dataset generato prima
+    di questa feature, o giocatore mock senza statistiche punto-per-punto).
+    """
+    sp = player.get("serve_points") or {"won": 0, "total": 0}
+    rp = player.get("return_points") or {"won": 0, "total": 0}
+    serve = round(sp["won"] / sp["total"] * 100, 1) if sp.get("total") else 0.0
+    ret = round(rp["won"] / rp["total"] * 100, 1) if rp.get("total") else 0.0
+    return {"serve_win_rate": serve, "return_win_rate": ret}
+
+
 def clutch_factor(player: dict) -> float:
     """
     Combined efficiency across break points attacked, break points saved,
@@ -118,9 +139,12 @@ def clutch_factor(player: dict) -> float:
 def compute_all(player: dict, surface: str) -> dict:
     """Convenience wrapper — returns all metrics in one dict."""
     form = surface_adjusted_form(player, surface)
+    rates = serve_return_rates(player)
     return {
         "fatigue_score":    form["fatigue_score"],
         "momentum_score":   form["momentum_score"],
         "surface_win_rate": surface_win_rate(player, surface),
         "clutch_factor":    clutch_factor(player),
+        "serve_win_rate":   rates["serve_win_rate"],
+        "return_win_rate":  rates["return_win_rate"],
     }
