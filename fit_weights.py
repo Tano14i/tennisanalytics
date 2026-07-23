@@ -125,9 +125,13 @@ def build_samples(rows: list[dict]):
 
     X/y/dates      → moneyline (chi vince), come prima.
     Xg/yg/dates_g  → regressione games totali: feature [avg_games_prior - 22,
-                     |rank_gap|, |surface_gap|] (pre-match), target = games
-                     totali REALI del match (solo se lo score è completo,
-                     niente ritiri/walkover che falserebbero il totale).
+                     |rank_gap|, |surface_gap|, best_of_flag] (pre-match),
+                     target = games totali REALI del match (solo se lo score
+                     è completo, niente ritiri/walkover che falserebbero il
+                     totale). best_of_flag = 1 per Slam maschili (bo5), 0 per
+                     circuito regolare (bo3) — un match bo5 è strutturalmente
+                     molto più lungo, mischiare i due formati senza questa
+                     feature gonfia intercetta e deviazione standard.
     """
     # ordina per (data, match_num) crescente
     def sort_key(r):
@@ -157,6 +161,10 @@ def build_samples(rows: list[dict]):
         # informazione pre-partita, quindi nessun leakage.
         w_rank, l_rank = _to_int(r.get("winner_rank")), _to_int(r.get("loser_rank"))
         total_games, _total_sets, games_completed = parse_score(score)
+        # best_of: solo 3 o 5 sono formati validi in ATP; qualunque altro
+        # valore (dato mancante/sporco) esclude il match dal training games,
+        # non da quello moneyline (che non dipende dal formato).
+        best_of = _to_int(r.get("best_of"), 0)
 
         ws = state.get(w)
         ls = state.get(l)
@@ -182,11 +190,12 @@ def build_samples(rows: list[dict]):
             # (games_matches>0), altrimenti la feature "avg_games_prior"
             # sarebbe 0 e sballerebbe la regressione.
             g_w, g_l = _games_avg(ws), _games_avg(ls)
-            if games_completed and g_w and g_l:
+            if games_completed and g_w and g_l and best_of in (3, 5):
                 avg_games_prior = (g_w + g_l) / 2
                 rank_gap = abs(rank_feature(r1, r2))
                 surf_gap = abs(p1["surface_win_rate"] - p2["surface_win_rate"])
-                Xg.append([avg_games_prior - GAMES_PRIOR_MEAN, rank_gap, surf_gap])
+                bo_flag = 1.0 if best_of >= 5 else 0.0
+                Xg.append([avg_games_prior - GAMES_PRIOR_MEAN, rank_gap, surf_gap, bo_flag])
                 yg.append(total_games)
                 dates_g.append(date or datetime.min)
 
@@ -300,7 +309,7 @@ def fit_games(Xg, yg, dates_g) -> dict | None:
     return {
         "intercept": round(float(final_model.intercept_), 4),
         "coef": [round(float(c), 5) for c in final_model.coef_],
-        "feature_names": ["avg_games_prior_centered", "abs_rank_gap", "abs_surface_gap"],
+        "feature_names": ["avg_games_prior_centered", "abs_rank_gap", "abs_surface_gap", "best_of_flag"],
         "residual_std": round(residual_std, 3),
         "n_samples": n,
         "val_mae_games": round(val_mae, 3) if val_mae is not None else None,

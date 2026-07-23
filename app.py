@@ -135,10 +135,12 @@ selected_label = st.selectbox(
 fixture = next((f for f in schedule if f["label"] == selected_label), schedule[0])
 
 # Fixture detail cards
-c1, c2, c3 = st.columns(3)
+best_of = dp.best_of_for_tournament(fixture["tournament"])
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("🏆 Tournament", fixture["tournament"])
 c2.metric("🏟️ Surface",    fixture["surface"])
 c3.metric("🕐 Time",       fixture["time"])
+c4.metric("🥎 Format",     f"Best-of-{best_of}")
 
 st.markdown("---")
 
@@ -165,13 +167,15 @@ with st.expander("🎯 Total Games & 🥎 Set (opzionale)"):
     odds_games_over = gc2.number_input("Quota Over", min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
     odds_games_under = gc3.number_input("Quota Under", min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
     sc1, sc2 = st.columns(2)
-    odds_straight = sc1.number_input("Quota 2 set (straight)", min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
-    odds_three = sc2.number_input("Quota 3 set (al terzo)", min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
+    straight_label = "Quota straight sets (2-0)" if best_of == 3 else "Quota straight sets (3-0)"
+    extra_label = "Quota oltre il minimo (3 set)" if best_of == 3 else "Quota oltre il minimo (4-5 set)"
+    odds_straight = sc1.number_input(straight_label, min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
+    odds_extra = sc2.number_input(extra_label, min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
 
 odds_games_over_val = odds_games_over if odds_games_over > 1.0 else None
 odds_games_under_val = odds_games_under if odds_games_under > 1.0 else None
 odds_straight_val = odds_straight if odds_straight > 1.0 else None
-odds_three_val = odds_three if odds_three > 1.0 else None
+odds_extra_val = odds_extra if odds_extra > 1.0 else None
 
 gen_btn = st.button("🚀 GENERA REPORT PER TELEGRAM", use_container_width=True)
 
@@ -210,7 +214,7 @@ if gen_btn:
                 odds1=odds1_val, odds2=odds2_val,
                 games_line=games_line,
                 odds_games_over=odds_games_over_val, odds_games_under=odds_games_under_val,
-                odds_straight_sets=odds_straight_val, odds_three_sets=odds_three_val,
+                odds_straight_sets=odds_straight_val, odds_extra_sets=odds_extra_val,
             )
 
         except Exception as exc:

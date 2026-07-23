@@ -141,16 +141,27 @@ def format_post(p1_name: str, p1_full: str, p1_stats: dict,
                 odds1: float | None = None, odds2: float | None = None,
                 games_line: float | None = None,
                 odds_games_over: float | None = None, odds_games_under: float | None = None,
-                odds_straight_sets: float | None = None, odds_three_sets: float | None = None) -> str:
+                odds_straight_sets: float | None = None, odds_extra_sets: float | None = None) -> str:
 
     insight = build_insight(p1_name, p1_stats, p2_name, p2_stats, surface)
     ev = betting.evaluate_value(p1_full, p1_stats, p2_full, p2_stats, odds1, odds2)
 
+    # Slam maschili (AO/RG/Wimbledon/US Open) = best-of-5, tutto il resto
+    # best-of-3: la struttura del match (lunghezza, distribuzione set/games)
+    # è radicalmente diversa e i due mercati sotto devono saperlo.
+    best_of = dp.best_of_for_tournament(tournament)
+
     # Games O/U e set usano la stessa linea "moneyline probability" del match
     # come input al modello dei set; games_line di default = 22.5 se non data.
     line = games_line if games_line is not None else 22.5
-    games_ev = betting.evaluate_games_value(p1_stats, p2_stats, line, odds_games_over, odds_games_under)
-    sets_ev = betting.evaluate_sets_value(ev["p1_prob"], odds_straight_sets, odds_three_sets)
+    games_ev = betting.evaluate_games_value(
+        p1_stats, p2_stats, line, best_of=best_of,
+        odds_over=odds_games_over, odds_under=odds_games_under,
+    )
+    sets_ev = betting.evaluate_sets_value(
+        ev["p1_prob"], best_of=best_of,
+        odds_straight=odds_straight_sets, odds_extra=odds_extra_sets,
+    )
     div = "━" * 40
 
     # Momentum labels and signed scores
@@ -189,7 +200,7 @@ def format_post(p1_name: str, p1_full: str, p1_stats: dict,
         f"🎯  TOTAL GAMES  (Over/Under {line})",
         betting.format_games_block(games_ev),
         "",
-        f"🥎  SETS  (2 set vs 3 set)",
+        f"🥎  SETS  (best-of-{best_of})",
         betting.format_sets_block(sets_ev),
         "",
         div,
@@ -220,9 +231,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--odds-games-under", type=float, default=None,
                         help="Decimal odds for Under the games line")
     parser.add_argument("--odds-straight-sets", type=float, default=None,
-                        help="Decimal odds for match in straight (2) sets")
-    parser.add_argument("--odds-three-sets", type=float, default=None,
-                        help="Decimal odds for match going the distance (3 sets)")
+                        help="Decimal odds for straight sets (2-0 best-of-3, 3-0 best-of-5 Slams)")
+    parser.add_argument("--odds-extra-sets", type=float, default=None,
+                        help="Decimal odds for match going beyond the minimum sets "
+                             "(3 sets best-of-3, 4-5 sets best-of-5 Slams)")
     return parser.parse_args()
 
 
@@ -262,7 +274,7 @@ def main() -> None:
         odds1=args.odds1, odds2=args.odds2,
         games_line=args.games_line,
         odds_games_over=args.odds_games_over, odds_games_under=args.odds_games_under,
-        odds_straight_sets=args.odds_straight_sets, odds_three_sets=args.odds_three_sets,
+        odds_straight_sets=args.odds_straight_sets, odds_extra_sets=args.odds_extra_sets,
     )
     print(post)
 

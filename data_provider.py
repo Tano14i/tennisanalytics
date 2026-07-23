@@ -293,6 +293,16 @@ TOURNAMENT_SURFACES: dict[str, str] = {
     "Marseille":          "Hard (Indoor)",
 }
 
+# I 4 Slam maschili si giocano al meglio dei 5 set; tutto il resto (circuito
+# regolare, Masters 1000, ecc.) al meglio dei 3. Rilevante per i mercati
+# Total Games e Set: un match bo5 ha una struttura di lunghezza radicalmente
+# diversa da uno bo3 (fino a ~65 games contro ~40).
+GRAND_SLAMS: set[str] = {"Roland Garros", "French Open", "Wimbledon", "US Open", "Australian Open"}
+
+
+def best_of_for_tournament(tournament_name: str) -> int:
+    return 5 if tournament_name in GRAND_SLAMS else 3
+
 # Keyword hints used by _infer_surface() to map raw API tournament names
 _LEAGUE_SURFACE_HINTS: dict[str, str] = {
     "roland garros": "Clay", "french open": "Clay",

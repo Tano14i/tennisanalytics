@@ -166,31 +166,40 @@ def evaluate_value(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MERCATO SET — formula chiusa, nessun peso da fittare.
+# MERCATO SET — formula chiusa, nessun peso da fittare. Generalizzata a
+# best-of-3 (circuito regolare) e best-of-5 (Slam maschili: Australian Open,
+# Roland Garros, Wimbledon, US Open).
 #
 # Assunzione: ogni set è un evento indipendente Bernoulli con probabilità
 # fissa q che player1 vince il set (modello "Bradley-Terry per set", standard
-# in letteratura tennis). Per un match al meglio dei 3 set:
-#   P(player1 vince il match) = q² + 2·q²·(1-q) = q²·(3-2q)
-# Questa funzione è monotona crescente in q su [0,1], quindi invertibile:
-# dalla probabilità di vittoria del match (dal modello sopra) si ricava q
-# per bisezione, poi si deriva la probabilità di "match in 2 set" vs "3 set":
-#   P(2 set)  = q² + (1-q)²   (uno dei due vince entrambi i set)
-#   P(3 set)  = 2·q·(1-q)
-# Nessun dato storico extra necessario: è conseguenza diretta di win_probability.
+# in letteratura tennis). Per un match al meglio di (2k-1) set, servono k set
+# vinti; la probabilità di vincere il match in ESATTAMENTE k+j set è:
+#   P(k+j set) = C(k+j-1, j) · q^k · (1-q)^j        [j = 0 .. k-1]
+# Sommando su j si ottiene P(match) = Σ C(k+j-1,j)·q^k·(1-q)^j, monotona
+# crescente in q → invertibile per bisezione dalla probabilità di vittoria
+# del match. Bo3 (k=2) si riduce a q²(3-2q), la formula originale.
+# Verificato con simulazione Monte Carlo (100k trial) per bo3 e bo5 su più q.
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _match_win_prob_from_set_prob(q: float) -> float:
-    return q * q * (3 - 2 * q)
+from math import comb as _comb
 
 
-def implied_set_win_prob(match_win_prob: float, tol: float = 1e-6) -> float:
-    """Inverte P(match) = q²(3-2q) per bisezione. match_win_prob in [0,1] → q in [0,1]."""
+def _sets_needed_to_win(best_of: int) -> int:
+    return (best_of + 1) // 2  # bo3 -> 2, bo5 -> 3
+
+
+def _match_win_prob_from_set_prob(q: float, best_of: int = 3) -> float:
+    k = _sets_needed_to_win(best_of)
+    return sum(_comb(k + j - 1, j) * (q ** k) * ((1 - q) ** j) for j in range(k))
+
+
+def implied_set_win_prob(match_win_prob: float, best_of: int = 3, tol: float = 1e-6) -> float:
+    """Inverte P(match)=Σ... per bisezione. match_win_prob in [0,1] → q in [0,1]."""
     p = min(1.0, max(0.0, match_win_prob))
     lo, hi = 0.0, 1.0
     for _ in range(60):
         mid = (lo + hi) / 2
-        if _match_win_prob_from_set_prob(mid) < p:
+        if _match_win_prob_from_set_prob(mid, best_of) < p:
             lo = mid
         else:
             hi = mid
@@ -199,69 +208,83 @@ def implied_set_win_prob(match_win_prob: float, tol: float = 1e-6) -> float:
     return (lo + hi) / 2
 
 
-def sets_distribution(p1_match_prob: float) -> dict:
+def sets_distribution(p1_match_prob: float, best_of: int = 3) -> dict:
     """
-    Distribuzione del numero di set dati P(player1 vince il match), assumendo
-    best-of-3 e set indipendenti con probabilità costante q (vedi sopra).
+    Distribuzione del numero di set dati P(player1 vince il match), per un
+    match al meglio di `best_of` set (3 o 5) e set indipendenti con
+    probabilità costante q (vedi sopra).
 
-    Ritorna: q (prob. per-set di player1), prob_straight_sets (match 2-0 per
-    uno dei due, cioè Under 2.5 set), prob_three_sets (Over 2.5 set).
+    Ritorna: best_of, q (prob. per-set di player1), per_length (dict lunghezza
+    match -> probabilità), prob_straight_sets (match nel minimo di set
+    possibile, es. 2-0 o 3-0), prob_extra_sets (match più lungo del minimo).
     """
-    q = implied_set_win_prob(p1_match_prob)
-    prob_straight = q * q + (1 - q) * (1 - q)
-    prob_three = 1.0 - prob_straight
+    q = implied_set_win_prob(p1_match_prob, best_of)
+    k = _sets_needed_to_win(best_of)
+    per_length = {}
+    for j in range(k):
+        n_sets = k + j
+        c = _comb(k + j - 1, j)
+        per_length[n_sets] = round(c * (q ** k) * ((1 - q) ** j) + c * ((1 - q) ** k) * (q ** j), 6)
+    prob_straight = per_length[k]
+    prob_extra = round(1.0 - prob_straight, 6)
     return {
+        "best_of": best_of,
         "implied_set_prob": round(q, 4),
+        "per_length": per_length,
         "prob_straight_sets": round(prob_straight, 4),
-        "prob_three_sets": round(prob_three, 4),
+        "prob_extra_sets": prob_extra,
     }
 
 
 def evaluate_sets_value(
     p1_prob: float,
+    best_of: int = 3,
     odds_straight: float | None = None,
-    odds_three: float | None = None,
+    odds_extra: float | None = None,
     min_edge: float = DEFAULT_MIN_EDGE,
 ) -> dict:
     """
-    Valore su Under 2.5 set (match in 2 set) vs Over 2.5 set (match ai 3 set),
-    con le quote di quel mercato. odds_straight = quota "Under 2.5 set" /
-    "match in due set"; odds_three = quota "Over 2.5 set" / "al terzo set".
+    Valore su "match nel minimo di set" (straight sets: 2-0 bo3 / 3-0 bo5)
+    vs "match oltre il minimo" (3 set bo3 / 4-5 set bo5), con le quote di
+    quel mercato (spesso chiamato "Straight Sets" dai bookmaker).
     """
-    dist = sets_distribution(p1_prob)
+    dist = sets_distribution(p1_prob, best_of)
     result = {
         **dist,
         "has_odds": False,
-        "odds_straight": odds_straight, "odds_three": odds_three,
-        "ev_straight": None, "ev_three": None,
+        "odds_straight": odds_straight, "odds_extra": odds_extra,
+        "ev_straight": None, "ev_extra": None,
         "value_pick": None, "value_edge": None, "value_odds": None,
     }
-    if not odds_straight or not odds_three:
+    if not odds_straight or not odds_extra:
         return result
 
     ev_straight = expected_value(dist["prob_straight_sets"], odds_straight)
-    ev_three = expected_value(dist["prob_three_sets"], odds_three)
-    result.update(has_odds=True, ev_straight=ev_straight, ev_three=ev_three)
+    ev_extra = expected_value(dist["prob_extra_sets"], odds_extra)
+    result.update(has_odds=True, ev_straight=ev_straight, ev_extra=ev_extra)
 
-    if ev_straight >= ev_three and ev_straight >= min_edge:
-        result.update(value_pick="Under 2.5 set (2-0)", value_edge=ev_straight, value_odds=odds_straight)
-    elif ev_three >= min_edge:
-        result.update(value_pick="Over 2.5 set (al terzo)", value_edge=ev_three, value_odds=odds_three)
+    straight_label = f"{best_of - (_sets_needed_to_win(best_of) - 1)}-0 (straight sets)"
+    extra_label = "match oltre il minimo di set"
+    if ev_straight >= ev_extra and ev_straight >= min_edge:
+        result.update(value_pick=straight_label, value_edge=ev_straight, value_odds=odds_straight)
+    elif ev_extra >= min_edge:
+        result.update(value_pick=extra_label, value_edge=ev_extra, value_odds=odds_extra)
     return result
 
 
 def format_sets_block(sets_ev: dict) -> str:
+    bo = sets_ev["best_of"]
+    lengths_str = "  •  ".join(f"{n} set {p*100:.0f}%" for n, p in sorted(sets_ev["per_length"].items()))
     lines = [
-        f"    Model: 2 set {sets_ev['prob_straight_sets']*100:.0f}%  •  "
-        f"3 set {sets_ev['prob_three_sets']*100:.0f}%  "
-        f"(da match win prob, formula best-of-3, per-set q={sets_ev['implied_set_prob']*100:.0f}%)"
+        f"    Model (best-of-{bo}): {lengths_str}  "
+        f"(da match win prob, per-set q={sets_ev['implied_set_prob']*100:.0f}%)"
     ]
     if not sets_ev["has_odds"]:
-        lines.append("    Odds: — (inserisci le quote O/U 2.5 set per valutare l'EV)")
+        lines.append("    Odds: — (inserisci le quote 'Straight Sets' per valutare l'EV)")
         return "\n".join(lines)
     lines.append(
-        f"    EV: Under 2.5 set {sets_ev['ev_straight']*100:+.1f}%  •  "
-        f"Over 2.5 set {sets_ev['ev_three']*100:+.1f}%"
+        f"    EV: straight sets {sets_ev['ev_straight']*100:+.1f}%  •  "
+        f"oltre il minimo {sets_ev['ev_extra']*100:+.1f}%"
     )
     if sets_ev["value_pick"]:
         lines.append(
@@ -277,19 +300,23 @@ def format_sets_block(sets_ev: dict) -> str:
 # MERCATO GAMES TOTALI (Over/Under) — regressione lineare fittata + Normale.
 #
 # expected_total_games = intercetta + coef · [avg_games_prior, |rank_diff|,
-#                                              |surface_diff|]
+#                                              |surface_diff|, best_of_flag]
 # fittata da fit_weights.py sui match reali (walk-forward, no leakage).
+# best_of_flag = 0 per best-of-3, 1 per best-of-5 (Slam maschili): un match al
+# meglio dei 5 set ha strutturalmente molti più games (fino a ~65) di uno al
+# meglio dei 3 — senza questa feature un dataset misto bo3/bo5 gonfia
+# artificialmente sia l'intercetta che la deviazione standard dei residui.
 # Senza games_weights.json: prior grezzo = media dei games_avg dei due
 # giocatori (o 22.0 di default), std fissa a 4.5 (tipico match best-of-3).
 # La probabilità Over/Under una linea usa una Normale attorno alla media
-# stimata (approssimazione ragionevole per un totale discreto ~12-40).
+# stimata (approssimazione ragionevole per un totale discreto ~12-65).
 # ═══════════════════════════════════════════════════════════════════════════
 
 _GAMES_PRIOR_MEAN = 22.0
 _GAMES_PRIOR_STD = 4.5
 
 _GAMES_INTERCEPT = _GAMES_PRIOR_MEAN
-_GAMES_COEF = [1.0, 0.0, 0.0]  # [avg_games_prior, |rank_diff|, |surface_diff|]
+_GAMES_COEF = [1.0, 0.0, 0.0, 0.0]  # [avg_games_prior, |rank_diff|, |surface_diff|, best_of_flag]
 _GAMES_STD = _GAMES_PRIOR_STD
 GAMES_SOURCE = "prior"
 
@@ -304,7 +331,12 @@ def _load_games_weights() -> None:
         with open(_GAMES_WEIGHTS_PATH, encoding="utf-8") as fh:
             w = json.load(fh)
         _GAMES_INTERCEPT = float(w["intercept"])
-        _GAMES_COEF = [float(c) for c in w["coef"]]
+        coef = [float(c) for c in w["coef"]]
+        # retrocompat: file generati prima della feature best_of hanno solo 3
+        # coefficienti → padding a 0.0 (nessun aggiustamento bo3/bo5).
+        while len(coef) < 4:
+            coef.append(0.0)
+        _GAMES_COEF = coef
         _GAMES_STD = float(w["residual_std"])
         GAMES_SOURCE = "fitted"
     except Exception:
@@ -320,7 +352,7 @@ def _norm_cdf(x: float, mean: float, std: float) -> float:
     return 0.5 * (1.0 + math.erf((x - mean) / (std * math.sqrt(2))))
 
 
-def expected_total_games(p1_stats: dict, p2_stats: dict) -> float:
+def expected_total_games(p1_stats: dict, p2_stats: dict, best_of: int = 3) -> float:
     """Media attesa di games totali nel match, dal modello fittato (o dal
     prior grezzo se games_weights.json non è presente)."""
     g1 = p1_stats.get("games_avg") or 0.0
@@ -334,22 +366,26 @@ def expected_total_games(p1_stats: dict, p2_stats: dict) -> float:
 
     rank_gap = abs(rank_feature(p1_stats.get("ranking", 0), p2_stats.get("ranking", 0)))
     surf_gap = abs(p1_stats.get("surface_win_rate", 0.0) - p2_stats.get("surface_win_rate", 0.0))
+    bo_flag = 1.0 if best_of >= 5 else 0.0
 
     mean = _GAMES_INTERCEPT + (
         _GAMES_COEF[0] * (avg_games_prior - _GAMES_PRIOR_MEAN)
         + _GAMES_COEF[1] * rank_gap
         + _GAMES_COEF[2] * surf_gap
+        + _GAMES_COEF[3] * bo_flag
     )
-    return max(12.0, mean)  # un match completo ha almeno 12 game (6-0 6-0)
+    min_games = 6 * ((best_of + 1) // 2)  # bo3: 12 (6-0 6-0), bo5: 18 (6-0 6-0 6-0)
+    return max(float(min_games), mean)
 
 
 def evaluate_games_value(
-    p1_stats: dict, p2_stats: dict, line: float,
+    p1_stats: dict, p2_stats: dict, line: float, best_of: int = 3,
     odds_over: float | None = None, odds_under: float | None = None,
     min_edge: float = DEFAULT_MIN_EDGE,
 ) -> dict:
-    """Valuta Over/Under `line` games totali (es. 22.5)."""
-    mean = expected_total_games(p1_stats, p2_stats)
+    """Valuta Over/Under `line` games totali (es. 22.5) per un match al
+    meglio di `best_of` set."""
+    mean = expected_total_games(p1_stats, p2_stats, best_of)
     p_under = _norm_cdf(line, mean, _GAMES_STD)
     p_over = 1.0 - p_under
     tag = "fitted" if GAMES_SOURCE == "fitted" else "heuristic prior"
