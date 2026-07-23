@@ -34,9 +34,14 @@ from build_dataset import (
     _to_int,
     fetch_year_csv,
     local_csv_path,
+    parse_score,
 )
 
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "betting_weights.json")
+GAMES_OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "games_weights.json")
+# Media games/match usata come centro della feature "avg_games_prior" nella
+# regressione — deve combaciare con betting._GAMES_PRIOR_MEAN.
+GAMES_PRIOR_MEAN = 22.0
 
 # Storia minima (match giocati) perché un giocatore contribuisca a un campione:
 # sotto, le metriche pre-match sono troppo instabili.
@@ -53,12 +58,18 @@ def _new_state(name: str) -> dict:
         "break_points": {"opportunities": 0, "converted": 0},
         "break_points_saved": {"faced": 0, "saved": 0},
         "tiebreaks": {"played": 0, "won": 0},
+        "games_sum": 0, "games_matches": 0,
     }
+
+
+def _games_avg(st: dict) -> float:
+    return (st["games_sum"] / st["games_matches"]) if st["games_matches"] else 0.0
 
 
 def _update_state(st: dict, surface: str, minutes: int, result: str,
                   bp_faced: int, bp_saved: int, bp_opp: int, bp_conv: int,
-                  tb_played: int, tb_won: int) -> None:
+                  tb_played: int, tb_won: int,
+                  total_games: int = 0, games_completed: bool = False) -> None:
     st["match_count"] += 1
     rec = st["surface_records"].setdefault(surface, {"wins": 0, "losses": 0})
     rec["wins" if result == "W" else "losses"] += 1
@@ -70,6 +81,9 @@ def _update_state(st: dict, surface: str, minutes: int, result: str,
     st["break_points_saved"]["saved"] += bp_saved
     st["tiebreaks"]["played"] += tb_played
     st["tiebreaks"]["won"] += tb_won
+    if games_completed:
+        st["games_sum"] += total_games
+        st["games_matches"] += 1
 
 
 def _orientation(date_key: str, w: str, l: str) -> int:
@@ -106,7 +120,15 @@ def _read_rows(from_dir: str | None, years: int):
 
 
 def build_samples(rows: list[dict]):
-    """Ritorna (X, y, dates) walk-forward, senza leakage."""
+    """
+    Ritorna (X, y, dates, Xg, yg, dates_g) walk-forward, senza leakage.
+
+    X/y/dates      → moneyline (chi vince), come prima.
+    Xg/yg/dates_g  → regressione games totali: feature [avg_games_prior - 22,
+                     |rank_gap|, |surface_gap|] (pre-match), target = games
+                     totali REALI del match (solo se lo score è completo,
+                     niente ritiri/walkover che falserebbero il totale).
+    """
     # ordina per (data, match_num) crescente
     def sort_key(r):
         d = _parse_date(r.get("tourney_date", ""))
@@ -115,6 +137,7 @@ def build_samples(rows: list[dict]):
     rows = sorted(rows, key=sort_key)
     state: dict[str, dict] = {}
     X, y, dates = [], [], []
+    Xg, yg, dates_g = [], [], []
 
     for r in rows:
         w = (r.get("winner_name") or "").strip()
@@ -133,6 +156,7 @@ def build_samples(rows: list[dict]):
         # ranking al momento del match (colonne winner_rank/loser_rank): è
         # informazione pre-partita, quindi nessun leakage.
         w_rank, l_rank = _to_int(r.get("winner_rank")), _to_int(r.get("loser_rank"))
+        total_games, _total_sets, games_completed = parse_score(score)
 
         ws = state.get(w)
         ls = state.get(l)
@@ -154,19 +178,33 @@ def build_samples(rows: list[dict]):
             y.append(target)
             dates.append(date or datetime.min)
 
+            # Campione games: richiede anche games_avg noto per entrambi
+            # (games_matches>0), altrimenti la feature "avg_games_prior"
+            # sarebbe 0 e sballerebbe la regressione.
+            g_w, g_l = _games_avg(ws), _games_avg(ls)
+            if games_completed and g_w and g_l:
+                avg_games_prior = (g_w + g_l) / 2
+                rank_gap = abs(rank_feature(r1, r2))
+                surf_gap = abs(p1["surface_win_rate"] - p2["surface_win_rate"])
+                Xg.append([avg_games_prior - GAMES_PRIOR_MEAN, rank_gap, surf_gap])
+                yg.append(total_games)
+                dates_g.append(date or datetime.min)
+
         # UPDATE dopo lo snapshot: il match del vincitore e del perdente
         state.setdefault(w, _new_state(w))
         state.setdefault(l, _new_state(l))
         _update_state(state[w], surface, minutes, "W",
                       bp_faced=w_bp_faced, bp_saved=w_bp_saved,
                       bp_opp=l_bp_faced, bp_conv=max(0, l_bp_faced - l_bp_saved),
-                      tb_played=w_tb_played, tb_won=w_tb_won)
+                      tb_played=w_tb_played, tb_won=w_tb_won,
+                      total_games=total_games, games_completed=games_completed)
         _update_state(state[l], surface, minutes, "L",
                       bp_faced=l_bp_faced, bp_saved=l_bp_saved,
                       bp_opp=w_bp_faced, bp_conv=max(0, w_bp_faced - w_bp_saved),
-                      tb_played=l_tb_played, tb_won=l_tb_won)
+                      tb_played=l_tb_played, tb_won=l_tb_won,
+                      total_games=total_games, games_completed=games_completed)
 
-    return X, y, dates
+    return X, y, dates, Xg, yg, dates_g
 
 
 def _metrics(model, X, y) -> dict:
@@ -227,11 +265,56 @@ def fit(X, y, dates) -> dict:
     }
 
 
+def fit_games(Xg, yg, dates_g) -> dict | None:
+    """
+    Regressione lineare: games_totali ~ intercetta + coef · feature.
+    Std dei residui calcolata sull'holdout (per la Normale usata nell'O/U),
+    non sul train, altrimenti sottostimerebbe l'incertezza reale.
+    """
+    if len(Xg) < 200:
+        return None
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import mean_absolute_error
+
+    n = len(Xg)
+    split = int(n * 0.8)
+    Xtr, ytr = Xg[:split], yg[:split]
+    Xva, yva = Xg[split:], yg[split:]
+
+    model = LinearRegression()
+    model.fit(Xtr, ytr)
+    val_pred = model.predict(Xva)
+    residuals = [a - p for a, p in zip(yva, val_pred)]
+    residual_std = (sum(r * r for r in residuals) / len(residuals)) ** 0.5 if residuals else 4.5
+    val_mae = float(mean_absolute_error(yva, val_pred)) if Xva else None
+
+    # rifitta su tutti i dati per il modello finale (intercept/coef usati a runtime)
+    final_model = LinearRegression()
+    final_model.fit(Xg, yg)
+
+    # NB: la feature 0 (avg_games_prior) è già centrata su GAMES_PRIOR_MEAN in
+    # build_samples, e il target (yg) è il numero di games grezzo — quindi
+    # l'intercetta di LinearRegression È GIÀ il valore fisico corretto
+    # ("games attesi con avg_games_prior=22, rank_gap=0, surf_gap=0"),
+    # nessuna somma aggiuntiva va applicata qui.
+    return {
+        "intercept": round(float(final_model.intercept_), 4),
+        "coef": [round(float(c), 5) for c in final_model.coef_],
+        "feature_names": ["avg_games_prior_centered", "abs_rank_gap", "abs_surface_gap"],
+        "residual_std": round(residual_std, 3),
+        "n_samples": n,
+        "val_mae_games": round(val_mae, 3) if val_mae is not None else None,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "note": "Target: total games reali (score completi). Holdout 20% finale per residual_std e MAE.",
+    }
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Fitta i pesi di betting.py sui match ATP reali (Sackmann).")
+    ap = argparse.ArgumentParser(description="Fitta i pesi di betting.py sui match ATP reali (Sackmann/TML).")
     ap.add_argument("--years", type=int, default=8, help="Anni recenti da includere (default 8)")
-    ap.add_argument("--from-dir", default=None, help="Cartella con atp_matches_YYYY.csv")
+    ap.add_argument("--from-dir", default=None, help="Cartella con atp_matches_YYYY.csv o YYYY.csv")
     ap.add_argument("--out", default=OUTPUT, help="Percorso betting_weights.json")
+    ap.add_argument("--games-out", default=GAMES_OUTPUT, help="Percorso games_weights.json")
     args = ap.parse_args()
 
     rows = _read_rows(args.from_dir, args.years)
@@ -239,23 +322,39 @@ def main() -> int:
         print("Nessun match caricato."); return 1
     print(f"Match totali letti: {len(rows)}")
 
-    X, y, dates = build_samples(rows)
+    X, y, dates, Xg, yg, dates_g = build_samples(rows)
     if len(X) < 200:
         print(f"Troppi pochi campioni walk-forward: {len(X)}. Aumenta --years."); return 1
-    print(f"Campioni walk-forward: {len(X)} | target medio: {sum(y)/len(y):.3f} (atteso ~0.5)")
+    print(f"Campioni walk-forward (moneyline): {len(X)} | target medio: {sum(y)/len(y):.3f} (atteso ~0.5)")
+    print(f"Campioni walk-forward (games)    : {len(Xg)}")
 
     result = fit(X, y, dates)
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(result, fh, ensure_ascii=False, indent=2)
 
-    print("\n── Pesi fittati ──")
+    print("\n── Pesi fittati (moneyline) ──")
     print(f"  w_surface  = {result['w_surface']}")
     print(f"  w_momentum = {result['w_momentum']}")
     print(f"  w_clutch   = {result['w_clutch']}")
     print(f"  w_rank     = {result['w_rank']}")
     print(f"  train: {result['train_metrics']}")
     print(f"  val  : {result['val_metrics']}")
-    print(f"\nScritto {args.out}. betting.py li caricherà in automatico.")
+    print(f"Scritto {args.out}.")
+
+    games_result = fit_games(Xg, yg, dates_g)
+    if games_result is None:
+        print(f"\nTroppi pochi campioni games ({len(Xg)}): games_weights.json NON generato, resta il prior.")
+    else:
+        with open(args.games_out, "w", encoding="utf-8") as fh:
+            json.dump(games_result, fh, ensure_ascii=False, indent=2)
+        print("\n── Pesi fittati (games O/U) ──")
+        print(f"  intercept (games medi base) = {games_result['intercept']}")
+        print(f"  coef {games_result['feature_names']} = {games_result['coef']}")
+        print(f"  residual_std (σ)  = {games_result['residual_std']}")
+        print(f"  val MAE (games)   = {games_result['val_mae_games']}")
+        print(f"Scritto {args.games_out}.")
+
+    print("\nbetting.py caricherà entrambi in automatico.")
     return 0
 
 

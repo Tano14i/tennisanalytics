@@ -2,7 +2,8 @@
 
 Genera analisi tennis pronte per Telegram/Discord: record per superficie,
 forma pesata per superficie ("momentum"), clutch factor (break point +
-tiebreak) e un insight testuale da tipster.
+tiebreak), un insight testuale da tipster, e valore atteso (EV) su tre
+mercati — **vincente match**, **Over/Under games totali**, **2 vs 3 set**.
 
 CLI e app Streamlit condividono lo stesso motore (`analytics.py`).
 
@@ -43,8 +44,11 @@ CLI:
 
 ```bash
 python main.py "Sinner" "Alcaraz" "Roland Garros"
-# con quote → calcola EV e value pick:
-python main.py "Sinner" "Alcaraz" "Roland Garros" --odds1 1.85 --odds2 1.95
+# con quote → calcola EV e value pick sui tre mercati:
+python main.py "Sinner" "Alcaraz" "Roland Garros" \
+  --odds1 1.85 --odds2 1.95 \
+  --games-line 22.5 --odds-games-over 1.90 --odds-games-under 1.90 \
+  --odds-straight-sets 2.10 --odds-three-sets 1.75
 ```
 
 App web:
@@ -79,6 +83,28 @@ riportando log-loss/accuracy/Brier vs la baseline p=0.5 → log-loss 0.693).
 `betting.py` carica `betting_weights.json` in automatico; senza il file resta
 sui prior. Il report indica quale dei due è attivo (`fitted` / `heuristic prior`).
 
+## Mercati Games e Set
+
+- **Total Games O/U**: la media attesa di games nel match viene da una
+  **regressione lineare fittata** (`fit_weights.py` la scrive in
+  `games_weights.json`) su tre feature pre-match: la media storica di
+  games/match dei due giocatori, il divario di ranking, il divario di record
+  per superficie. La probabilità Over/Under una linea usa una distribuzione
+  Normale attorno a quella media, con deviazione standard misurata sui residui
+  reali (holdout). Senza il file, resta un prior grezzo (media dei due
+  giocatori, o 22.0 games con σ=4.5 se mancano dati).
+- **2 vs 3 set**: **non è fittato** — è una formula chiusa derivata
+  matematicamente dalla probabilità di vittoria del match, assumendo set
+  indipendenti con probabilità costante *q* (modello standard "Bradley-Terry
+  per set" per il best-of-3: `P(match) = q²(3-2q)`). Da *q* si ricavano
+  `P(2 set) = q²+(1-q)²` e `P(3 set) = 2q(1-q)`. Nessun peso extra da
+  addestrare: è conseguenza diretta del modello vincente.
+
+`fit_weights.py` genera entrambi i file in un solo comando (`python
+fit_weights.py --years 8`); commit di `games_weights.json` insieme agli altri
+due (`players_data.json`, `betting_weights.json`) per portare tutto in
+produzione.
+
 ## Calendario live (opzionale)
 
 `data_provider.py` può leggere il calendario del giorno da un'API tennis via
@@ -92,5 +118,7 @@ statistiche giocatore usano comunque il dataset reale generato sopra.
 - `analytics.py` — motore metriche (funzioni pure, senza side effect)
 - `data_provider.py` — dati giocatori (dataset reale → mock) + calendario
 - `build_dataset.py` — genera `players_data.json` dai match ATP reali
+- `betting.py` — probabilità di vittoria, EV, mercati Total Games e Set
+- `fit_weights.py` — calibra `betting_weights.json` e `games_weights.json` sui dati reali
 - `main.py` — CLI + rendering del post
 - `app.py` — frontend Streamlit

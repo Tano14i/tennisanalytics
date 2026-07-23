@@ -263,6 +263,7 @@ def _ensure_player_shape(record: dict) -> dict:
             record[key] = factory()
     record.setdefault("full_name", "Unknown")
     record.setdefault("ranking", 0)
+    record.setdefault("games_avg", 0.0)  # 0.0 = "ignoto" → betting usa il prior grezzo
     return record
 
 

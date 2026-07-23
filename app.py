@@ -159,6 +159,20 @@ odds2 = oc2.number_input(
 odds1_val = odds1 if odds1 > 1.0 else None
 odds2_val = odds2 if odds2 > 1.0 else None
 
+with st.expander("🎯 Total Games & 🥎 Set (opzionale)"):
+    gc1, gc2, gc3 = st.columns(3)
+    games_line = gc1.number_input("Linea games", min_value=10.0, max_value=40.0, value=22.5, step=0.5)
+    odds_games_over = gc2.number_input("Quota Over", min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
+    odds_games_under = gc3.number_input("Quota Under", min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
+    sc1, sc2 = st.columns(2)
+    odds_straight = sc1.number_input("Quota 2 set (straight)", min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
+    odds_three = sc2.number_input("Quota 3 set (al terzo)", min_value=1.0, max_value=100.0, value=1.0, step=0.05, format="%.2f")
+
+odds_games_over_val = odds_games_over if odds_games_over > 1.0 else None
+odds_games_under_val = odds_games_under if odds_games_under > 1.0 else None
+odds_straight_val = odds_straight if odds_straight > 1.0 else None
+odds_three_val = odds_three if odds_three > 1.0 else None
+
 gen_btn = st.button("🚀 GENERA REPORT PER TELEGRAM", use_container_width=True)
 
 if gen_btn:
@@ -173,6 +187,8 @@ if gen_btn:
             p2_stats = an.compute_all(p2_data, fixture["surface"])
             p1_stats["ranking"] = p1_data.get("ranking", 0)
             p2_stats["ranking"] = p2_data.get("ranking", 0)
+            p1_stats["games_avg"] = p1_data.get("games_avg", 0.0)
+            p2_stats["games_avg"] = p2_data.get("games_avg", 0.0)
 
             # Extract short keys (e.g. "Sinner") for the insight engine.
             # Fall back to the full name if no short key is found in PLAYERS.
@@ -192,6 +208,9 @@ if gen_btn:
                 p2_key, p2_data["full_name"], p2_stats,
                 fixture["tournament"], fixture["surface"],
                 odds1=odds1_val, odds2=odds2_val,
+                games_line=games_line,
+                odds_games_over=odds_games_over_val, odds_games_under=odds_games_under_val,
+                odds_straight_sets=odds_straight_val, odds_three_sets=odds_three_val,
             )
 
         except Exception as exc:

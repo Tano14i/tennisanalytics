@@ -128,12 +128,35 @@ def _count_tiebreaks(score: str, player_is_winner: bool) -> tuple[int, int]:
     return played, won
 
 
+def parse_score(score: str):
+    """Dallo score ritorna (total_games, total_sets, completed).
+    completed=False per ritiri/walkover/set incompleti (non usabili per O/U)."""
+    s = (score or "").strip()
+    if not s or any(tok in s.upper() for tok in ("RET", "W/O", "WALKOVER", "DEF", "ABD", "ABN")):
+        return 0, 0, False
+    games = sets = 0
+    for raw_set in s.split():
+        core = raw_set.split("(")[0]
+        if "-" not in core:
+            continue
+        a, _, b = core.partition("-")
+        a_i, b_i = _to_int(a, -1), _to_int(b, -1)
+        if a_i < 0 or b_i < 0:
+            continue
+        games += a_i + b_i
+        sets += 1
+    if sets == 0:
+        return 0, 0, False
+    return games, sets, True
+
+
 def _blank_player(name: str) -> dict:
     return {
         "full_name": name,
         "ranking": 0,
         "latest_date": None,  # data del match più recente visto (per il ranking)
         "match_count": 0,
+        "games_sum": 0, "games_matches": 0,  # per media games/match (mercati O/U)
         "recent_raw": [],  # (date, surface, minutes, result) — ridotto dopo
         "surface_records": defaultdict(lambda: {"wins": 0, "losses": 0}),
         # clutch aggregato (BP + tie-break) su tutto lo storico caricato
@@ -163,9 +186,14 @@ def _ingest_match(players: dict, row: dict) -> None:
     w_rank = _to_int(row.get("winner_rank"))
     l_rank = _to_int(row.get("loser_rank"))
 
+    total_games, _total_sets, completed = parse_score(score)
+
     for name, is_winner, rank in ((w_name, True, w_rank), (l_name, False, l_rank)):
         p = players.setdefault(name, _blank_player(name))
         p["match_count"] += 1
+        if completed:
+            p["games_sum"] += total_games
+            p["games_matches"] += 1
         rec = p["surface_records"][surface]
         rec["wins" if is_winner else "losses"] += 1
         p["recent_raw"].append((date, surface, minutes, "W" if is_winner else "L"))
@@ -211,6 +239,7 @@ def _finalize(players: dict, top: int) -> dict:
             for (_d, surf, mins, res) in recent
         ]
         short_key = p["full_name"].split()[-1]  # cognome come chiave breve
+        games_avg = round(p["games_sum"] / p["games_matches"], 2) if p["games_matches"] else 0.0
         out[short_key] = {
             "full_name": p["full_name"],
             "ranking": p["ranking"],
@@ -222,6 +251,9 @@ def _finalize(players: dict, top: int) -> dict:
             },
             "break_points_saved": {"faced": p["bp_faced"], "saved": p["bp_saved"]},
             "tiebreaks": {"played": p["tb_played"], "won": p["tb_won"]},
+            # media games totali (entrambi i giocatori) per match completato:
+            # feature base per i mercati O/U games. 0.0 se nessun dato.
+            "games_avg": games_avg,
             "_data_source": "sackmann",
         }
         if len(out) >= top:

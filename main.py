@@ -138,10 +138,19 @@ def build_insight(p1_name: str, p1_stats: dict,
 def format_post(p1_name: str, p1_full: str, p1_stats: dict,
                 p2_name: str, p2_full: str, p2_stats: dict,
                 tournament: str, surface: str,
-                odds1: float | None = None, odds2: float | None = None) -> str:
+                odds1: float | None = None, odds2: float | None = None,
+                games_line: float | None = None,
+                odds_games_over: float | None = None, odds_games_under: float | None = None,
+                odds_straight_sets: float | None = None, odds_three_sets: float | None = None) -> str:
 
     insight = build_insight(p1_name, p1_stats, p2_name, p2_stats, surface)
     ev = betting.evaluate_value(p1_full, p1_stats, p2_full, p2_stats, odds1, odds2)
+
+    # Games O/U e set usano la stessa linea "moneyline probability" del match
+    # come input al modello dei set; games_line di default = 22.5 se non data.
+    line = games_line if games_line is not None else 22.5
+    games_ev = betting.evaluate_games_value(p1_stats, p2_stats, line, odds_games_over, odds_games_under)
+    sets_ev = betting.evaluate_sets_value(ev["p1_prob"], odds_straight_sets, odds_three_sets)
     div = "━" * 40
 
     # Momentum labels and signed scores
@@ -174,8 +183,14 @@ def format_post(p1_name: str, p1_full: str, p1_stats: dict,
         f"    {p1_full:<22} {p1_stats['clutch_factor']:>5}%",
         f"    {p2_full:<22} {p2_stats['clutch_factor']:>5}%",
         "",
-        f"💰  VALUE & EXPECTED VALUE",
+        f"💰  VALUE & EXPECTED VALUE  (match winner)",
         betting.format_value_block(ev),
+        "",
+        f"🎯  TOTAL GAMES  (Over/Under {line})",
+        betting.format_games_block(games_ev),
+        "",
+        f"🥎  SETS  (2 set vs 3 set)",
+        betting.format_sets_block(sets_ev),
         "",
         div,
         f"💡  TIPSTER INSIGHT",
@@ -198,6 +213,16 @@ def parse_args() -> argparse.Namespace:
                         help="Decimal odds for player1 (enables EV / value pick)")
     parser.add_argument("--odds2", type=float, default=None,
                         help="Decimal odds for player2 (enables EV / value pick)")
+    parser.add_argument("--games-line", type=float, default=None,
+                        help="Total games O/U line (default 22.5)")
+    parser.add_argument("--odds-games-over", type=float, default=None,
+                        help="Decimal odds for Over the games line")
+    parser.add_argument("--odds-games-under", type=float, default=None,
+                        help="Decimal odds for Under the games line")
+    parser.add_argument("--odds-straight-sets", type=float, default=None,
+                        help="Decimal odds for match in straight (2) sets")
+    parser.add_argument("--odds-three-sets", type=float, default=None,
+                        help="Decimal odds for match going the distance (3 sets)")
     return parser.parse_args()
 
 
@@ -226,6 +251,8 @@ def main() -> None:
     p2_stats = analytics.compute_all(p2_data, surface)
     p1_stats["ranking"] = p1_data.get("ranking", 0)
     p2_stats["ranking"] = p2_data.get("ranking", 0)
+    p1_stats["games_avg"] = p1_data.get("games_avg", 0.0)
+    p2_stats["games_avg"] = p2_data.get("games_avg", 0.0)
 
     # Render and print
     post = format_post(
@@ -233,6 +260,9 @@ def main() -> None:
         args.player2_name, p2_data["full_name"], p2_stats,
         args.tournament_name, surface,
         odds1=args.odds1, odds2=args.odds2,
+        games_line=args.games_line,
+        odds_games_over=args.odds_games_over, odds_games_under=args.odds_games_under,
+        odds_straight_sets=args.odds_straight_sets, odds_three_sets=args.odds_three_sets,
     )
     print(post)
 
