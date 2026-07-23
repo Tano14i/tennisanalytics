@@ -2,3 +2,5 @@ numpy
 requests
 streamlit
 scikit-learn
+pandas
+openpyxl

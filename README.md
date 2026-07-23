@@ -48,7 +48,7 @@ python main.py "Sinner" "Alcaraz" "Roland Garros"
 python main.py "Sinner" "Alcaraz" "Roland Garros" \
   --odds1 1.85 --odds2 1.95 \
   --games-line 22.5 --odds-games-over 1.90 --odds-games-under 1.90 \
-  --odds-straight-sets 2.10 --odds-three-sets 1.75
+  --odds-straight-sets 2.10 --odds-extra-sets 1.75
 ```
 
 App web:
@@ -93,17 +93,55 @@ sui prior. Il report indica quale dei due è attivo (`fitted` / `heuristic prior
   Normale attorno a quella media, con deviazione standard misurata sui residui
   reali (holdout). Senza il file, resta un prior grezzo (media dei due
   giocatori, o 22.0 games con σ=4.5 se mancano dati).
-- **2 vs 3 set**: **non è fittato** — è una formula chiusa derivata
-  matematicamente dalla probabilità di vittoria del match, assumendo set
-  indipendenti con probabilità costante *q* (modello standard "Bradley-Terry
-  per set" per il best-of-3: `P(match) = q²(3-2q)`). Da *q* si ricavano
-  `P(2 set) = q²+(1-q)²` e `P(3 set) = 2q(1-q)`. Nessun peso extra da
-  addestrare: è conseguenza diretta del modello vincente.
+- **Straight sets vs oltre il minimo**: **non è fittato** — è una formula
+  chiusa derivata matematicamente dalla probabilità di vittoria del match,
+  assumendo set indipendenti con probabilità costante *q* ("Bradley-Terry per
+  set"), generalizzata a best-of-3 e best-of-5 (gli Slam maschili si giocano
+  al meglio dei 5, non 3 — `data_provider.best_of_for_tournament()` lo
+  determina dal torneo). Nessun peso extra da addestrare: è conseguenza
+  diretta del modello vincente, verificata contro una simulazione Monte
+  Carlo indipendente.
+- **best-of-3 vs best-of-5**: un match bo5 ha strutturalmente più games (in
+  media) E più varianza assoluta di un bo3 — non solo una media diversa. Il
+  modello games ha una feature dedicata (`best_of_flag`) e **due deviazioni
+  standard separate** (`residual_std_bo3`/`residual_std_bo5`, fallback al
+  valore aggregato se un formato ha troppo pochi campioni nell'holdout).
 
 `fit_weights.py` genera entrambi i file in un solo comando (`python
 fit_weights.py --years 8`); commit di `games_weights.json` insieme agli altri
 due (`players_data.json`, `betting_weights.json`) per portare tutto in
 produzione.
+
+## Backtest: il modello avrebbe fatto soldi davvero?
+
+`fit_weights.py` misura solo l'**accuratezza** (quanto spesso il modello
+indovina il vincitore) — non dice se, alle quote vere, avrebbe generato
+profitto. `backtest.py` chiude quel cerchio: cammina i match storici in
+ordine cronologico (stessa disciplina walk-forward, zero leakage), abbina
+ogni match a una quota storica reale, e simula "punta 1 unità ogni volta che
+l'EV supera la soglia" — poi misura il ROI **realizzato**.
+
+Fonte quote: [tennis-data.co.uk](http://www.tennis-data.co.uk/alldata.php) —
+un file per anno (xlsx/csv), quote di più bookmaker + medie. Scaricalo tu
+manualmente (questo ambiente non può raggiungere quel dominio) e **leggi tu
+i termini d'uso del sito** prima di scaricare/usare i dati.
+
+```bash
+python backtest.py --odds-dir ./tennis-data --from-dir ./TML-Database --years 8
+```
+
+Limiti onesti:
+- **Solo il mercato vincente match** ha un backtest storico — tennis-data.co.uk
+  non ha quote O/U games/set storiche (nessuna fonte gratuita nota le ha).
+- I nomi sono scritti in modo diverso nei due dataset ("Jannik Sinner" vs
+  "Sinner J."): l'abbinamento è per cognome+iniziale su **entrambi** i
+  giocatori, con finestra di date attorno al torneo. Match ambigui (più
+  candidati) o non abbinabili (es. cognomi con "Del/Van/De") vengono
+  **scartati**, mai indovinati — meno campioni ma nessun dato falsato. Ogni
+  riga di quote viene usata al massimo una volta.
+- Il ROI dipende moltissimo dalla soglia `--min-edge` (default 0.05) e dalla
+  qualità delle quote scelte (`AvgW/AvgL`, media su più bookmaker, è la stima
+  di mercato più robusta — preferibile a un singolo bookmaker).
 
 ## Calendario live (opzionale)
 
@@ -120,5 +158,6 @@ statistiche giocatore usano comunque il dataset reale generato sopra.
 - `build_dataset.py` — genera `players_data.json` dai match ATP reali
 - `betting.py` — probabilità di vittoria, EV, mercati Total Games e Set
 - `fit_weights.py` — calibra `betting_weights.json` e `games_weights.json` sui dati reali
+- `backtest.py` — backtest ROI/hit-rate sul mercato vincente con quote storiche reali
 - `main.py` — CLI + rendering del post
 - `app.py` — frontend Streamlit
