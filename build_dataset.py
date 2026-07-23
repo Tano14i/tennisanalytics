@@ -30,30 +30,46 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 
-# Branch del repo Sackmann provati in ordine (master storicamente, main come
-# fallback in caso di rinomina). RAW_BASE resta per compatibilita'.
-_RAW_REPO = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp"
-_BRANCHES = ("master", "main")
-RAW_BASE = f"{_RAW_REPO}/master"
+# Fonti dati (schema colonne identico Sackmann). La prima che risponde vince.
+# TML-Database è un mirror ATP vivo e aggiornato (file annuali "YYYY.csv");
+# Sackmann/tennis_atp è tenuto come fallback storico ma il suo repo è stato
+# rimosso da GitHub (404) — resta qui nel caso torni disponibile.
+_SOURCES = (
+    ("https://raw.githubusercontent.com/Tennismylife/TML-Database", ("master", "main"), "{year}.csv"),
+    ("https://raw.githubusercontent.com/JeffSackmann/tennis_atp", ("master", "main"), "atp_matches_{year}.csv"),
+)
+# Nomi file accettati con --from-dir (TML: "2024.csv"; Sackmann: "atp_matches_2024.csv").
+_LOCAL_PATTERNS = ("{year}.csv", "atp_matches_{year}.csv")
+RAW_BASE = "https://raw.githubusercontent.com/Tennismylife/TML-Database/master"  # compat
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "players_data.json")
 
 
 def fetch_year_csv(year: int, session=None):
-    """Scarica atp_matches_<year>.csv provando i branch noti.
-    Ritorna il testo CSV, oppure None se non trovato su nessun branch."""
+    """Scarica il CSV dei match dell'anno dalla prima fonte disponibile.
+    Ritorna il testo CSV, oppure None se non trovato in nessuna fonte."""
     import requests
     get = (session or requests).get
     last = None
-    for branch in _BRANCHES:
-        url = f"{_RAW_REPO}/{branch}/atp_matches_{year}.csv"
-        try:
-            resp = get(url, timeout=30)
-            if resp.status_code == 200:
-                return resp.text
-            last = f"HTTP {resp.status_code}"
-        except Exception as exc:
-            last = repr(exc)
-    print(f"[skip] atp_matches_{year}.csv non trovato ({last})")
+    for base, branches, tmpl in _SOURCES:
+        for branch in branches:
+            url = f"{base}/{branch}/{tmpl.format(year=year)}"
+            try:
+                resp = get(url, timeout=30)
+                if resp.status_code == 200:
+                    return resp.text
+                last = f"{url} -> HTTP {resp.status_code}"
+            except Exception as exc:
+                last = f"{url} -> {exc!r}"
+    print(f"[skip] anno {year} non trovato ({last})")
+    return None
+
+
+def local_csv_path(from_dir: str, year: int):
+    """Percorso del CSV dell'anno in una cartella locale, provando i pattern noti."""
+    for tmpl in _LOCAL_PATTERNS:
+        p = os.path.join(from_dir, tmpl.format(year=year))
+        if os.path.exists(p):
+            return p
     return None
 
 # Superfici come le usa l'app (analytics/data_provider).
@@ -219,9 +235,9 @@ def build(years: int, top: int, from_dir: str | None) -> dict:
 
     if from_dir:
         for y in year_list:
-            path = os.path.join(from_dir, f"atp_matches_{y}.csv")
-            if not os.path.exists(path):
-                print(f"[skip] {path} non trovato")
+            path = local_csv_path(from_dir, y)
+            if not path:
+                print(f"[skip] nessun CSV per {y} in {from_dir}")
                 continue
             with open(path, encoding="utf-8") as fh:
                 n = _load_csv_text(fh.read(), players)

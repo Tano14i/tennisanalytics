@@ -26,7 +26,14 @@ import sys
 from datetime import datetime
 
 import analytics
-from build_dataset import _canon_surface, _count_tiebreaks, _parse_date, _to_int, fetch_year_csv
+from build_dataset import (
+    _canon_surface,
+    _count_tiebreaks,
+    _parse_date,
+    _to_int,
+    fetch_year_csv,
+    local_csv_path,
+)
 
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "betting_weights.json")
 
@@ -78,9 +85,9 @@ def _read_rows(from_dir: str | None, years: int):
     rows = []
     if from_dir:
         for y in year_list:
-            path = os.path.join(from_dir, f"atp_matches_{y}.csv")
-            if not os.path.exists(path):
-                print(f"[skip] {path} non trovato")
+            path = local_csv_path(from_dir, y)
+            if not path:
+                print(f"[skip] nessun CSV per {y} in {from_dir}")
                 continue
             with open(path, encoding="utf-8") as fh:
                 for r in csv.DictReader(fh):

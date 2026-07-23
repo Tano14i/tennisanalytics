@@ -10,8 +10,11 @@ CLI e app Streamlit condividono lo stesso motore (`analytics.py`).
 
 Il tool nasce con 8 giocatori d'esempio (mock) hardcoded in `data_provider.py`,
 così funziona subito. Per usare **statistiche reali** genera il dataset dai
-match ATP storici di [Jeff Sackmann](https://github.com/JeffSackmann/tennis_atp)
-(pubblico, gratuito):
+match ATP storici. Fonte dati:
+[TML-Database](https://github.com/Tennismylife/TML-Database) — mirror ATP vivo
+e aggiornato con lo schema di Jeff Sackmann (il repo originale
+`JeffSackmann/tennis_atp` è stato rimosso da GitHub; resta come fallback se
+tornasse online).
 
 ```bash
 pip install -r requirements.txt
@@ -25,10 +28,13 @@ all'avvio; se il file non c'è, resta il fallback mock.
 Commit del file generato (`git add players_data.json`) così anche l'app
 deployata parte con i dati reali.
 
-Se hai già scaricato i CSV a mano:
+Se il download diretto è bloccato dalla tua rete, clona il database e usa
+`--from-dir` (accetta sia i file TML `YYYY.csv` sia quelli Sackmann
+`atp_matches_YYYY.csv`):
 
 ```bash
-python build_dataset.py --from-dir ./cartella_csv --years 4 --top 60
+git clone --depth 1 https://github.com/Tennismylife/TML-Database.git
+python build_dataset.py --from-dir ./TML-Database --years 4 --top 60
 ```
 
 ## Avvio
